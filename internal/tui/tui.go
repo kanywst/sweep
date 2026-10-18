@@ -3,7 +3,7 @@ package tui
 
 import (
 	"context"
-	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -13,7 +13,6 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/kanywst/sweep/internal/format"
 	"github.com/kanywst/sweep/internal/proc"
@@ -50,13 +49,24 @@ const (
 	modeScanning mode = iota
 	modeList
 	modeConfirm
-	modeStopping
+)
+
+// state is what happened to a listener this session.
+type state int
+
+const (
+	stateLive state = iota
+	stateStopping
+	stateStopped
+	stateForced // stopped, but only after SIGKILL
+	stateFailed
 )
 
 type item struct {
-	group int // index into groups
-	l     *scan.Listener
-	head  bool // a directory heading
+	group  int
+	l      *scan.Listener
+	head   bool
+	spacer bool // blank line between directories
 }
 
 type (
@@ -64,23 +74,44 @@ type (
 		groups []scan.Group
 		err    error
 	}
-	stopDoneMsg struct{ results []proc.Result }
+	// stoppedMsg reports one listener and its launchers.
+	stoppedMsg struct {
+		pid     int
+		results []proc.Result
+	}
+	flashDoneMsg struct{ seq int }
 )
+
+// tally is what has been swept.
+type tally struct {
+	procs, forced, failed int
+	rss                   int64
+	ports                 []string
+}
 
 type model struct {
 	backend  Backend
 	mode     mode
 	groups   []scan.Group
 	items    []item
-	selected map[int]bool // by pid
+	selected map[int]bool
+	states   map[int]state
+	errs     map[int]error
 	cursor   int
 	offset   int
 	width    int
 	height   int
 	now      time.Time
-	status   string
-	statusOK bool
 	err      error
+
+	// The current stop batch.
+	batch, batchDone int
+
+	swept     tally // this session
+	lastBatch tally // the most recent confirm
+	flashSeq  int
+	flashing  bool
+	noAnim    bool
 
 	dark    bool
 	st      styles
@@ -93,18 +124,21 @@ func newModel(b Backend) model {
 	m := model{
 		backend:  b,
 		selected: map[int]bool{},
+		states:   map[int]state{},
+		errs:     map[int]error{},
 		dark:     true,
 		keys:     defaultKeys(),
 		help:     help.New(),
+		noAnim:   os.Getenv("SWEEP_NO_ANIM") != "",
 	}
 	m.applyTheme()
-	m.spinner = spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(lipgloss.NewStyle().Foreground(m.st.accent)))
 	return m
 }
 
 func (m *model) applyTheme() {
 	m.st = newStyles(m.dark)
 	m.help.Styles = help.DefaultStyles(m.dark)
+	m.spinner = spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(lipgloss.NewStyle().Foreground(m.st.p.aqua)))
 }
 
 func (m model) Init() tea.Cmd {
@@ -120,9 +154,13 @@ func scanCmd(b Backend) tea.Cmd {
 	}
 }
 
-func stopCmd(b Backend, pids []int) tea.Cmd {
-	return func() tea.Msg { return stopDoneMsg{b.Stop(pids)} }
+func stopCmd(b Backend, l scan.Listener) tea.Cmd {
+	return func() tea.Msg {
+		return stoppedMsg{pid: l.PID, results: b.Stop(append([]int{l.PID}, l.LauncherPIDs()...))}
+	}
 }
+
+func (m model) busy() bool { return m.mode == modeScanning || m.batchDone < m.batch }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -135,11 +173,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BackgroundColorMsg:
 		m.dark = msg.IsDark()
 		m.applyTheme()
-		m.spinner.Style = lipgloss.NewStyle().Foreground(m.st.accent)
-		return m, nil
+		return m, m.spinner.Tick
 
 	case spinner.TickMsg:
-		if m.mode != modeScanning && m.mode != modeStopping {
+		if !m.busy() {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -151,21 +188,53 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setGroups(msg.groups)
 		return m, nil
 
-	case stopDoneMsg:
-		m.status, m.statusOK = summarize(msg.results), true
-		for _, r := range msg.results {
-			delete(m.selected, r.PID)
-			if r.Err != nil {
-				m.statusOK = false
-			}
+	case stoppedMsg:
+		return m.recordStop(msg)
+
+	case flashDoneMsg:
+		if msg.seq == m.flashSeq {
+			m.flashing = false
 		}
-		m.mode = modeScanning
-		return m, tea.Batch(scanCmd(m.backend), m.spinner.Tick)
+		return m, nil
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
 	return m, nil
+}
+
+func (m model) recordStop(msg stoppedMsg) (tea.Model, tea.Cmd) {
+	m.batchDone++
+	delete(m.selected, msg.pid)
+	server := msg.results[0]
+	if server.Err != nil {
+		m.states[msg.pid], m.errs[msg.pid] = stateFailed, server.Err
+		m.lastBatch.failed++
+		m.swept.failed++
+		return m, nil
+	}
+	m.states[msg.pid] = stateStopped
+	if server.Killed {
+		m.states[msg.pid] = stateForced
+		m.lastBatch.forced++
+		m.swept.forced++
+	}
+	m.lastBatch.procs++
+	m.swept.procs++
+	if l := m.find(msg.pid); l != nil {
+		m.lastBatch.rss += l.RSS
+		m.swept.rss += l.RSS
+		ports := strings.Fields(format.Ports(l.Addrs))
+		m.lastBatch.ports = append(m.lastBatch.ports, ports...)
+		m.swept.ports = append(m.swept.ports, ports...)
+	}
+	if m.noAnim {
+		return m, nil
+	}
+	m.flashSeq++
+	m.flashing = true
+	seq := m.flashSeq
+	return m, tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg { return flashDoneMsg{seq} })
 }
 
 func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -175,9 +244,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.mode == modeConfirm {
 		switch {
 		case key.Matches(msg, m.keys.Confirm):
-			pids := m.stopSet()
-			m.mode = modeStopping
-			return m, tea.Batch(stopCmd(m.backend, pids), m.spinner.Tick)
+			return m.startStop()
 		case key.Matches(msg, m.keys.Cancel):
 			m.mode = modeList
 		}
@@ -186,6 +253,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.mode != modeList {
 		return m, nil
 	}
+	stopping := m.batchDone < m.batch
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
@@ -208,11 +276,14 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Clear):
 		clear(m.selected)
 	case key.Matches(msg, m.keys.Stop):
-		if len(m.targets()) > 0 {
+		if !stopping && len(m.targets()) > 0 {
 			m.mode = modeConfirm
 		}
 	case key.Matches(msg, m.keys.Refresh):
-		m.mode, m.status = modeScanning, ""
+		if stopping {
+			return m, nil
+		}
+		m.mode = modeScanning
 		return m, tea.Batch(scanCmd(m.backend), m.spinner.Tick)
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
@@ -221,11 +292,27 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) startStop() (tea.Model, tea.Cmd) {
+	ts := m.targets()
+	m.mode = modeList
+	m.batch, m.batchDone = len(ts), 0
+	m.lastBatch = tally{}
+	cmds := []tea.Cmd{m.spinner.Tick}
+	for _, l := range ts {
+		m.states[l.PID] = stateStopping
+		cmds = append(cmds, stopCmd(m.backend, l))
+	}
+	return m, tea.Batch(cmds...)
+}
+
 func (m *model) setGroups(gs []scan.Group) {
 	m.groups = gs
 	m.items = m.items[:0]
 	alive := map[int]bool{}
 	for gi := range gs {
+		if gi > 0 {
+			m.items = append(m.items, item{group: gi, spacer: true})
+		}
 		m.items = append(m.items, item{group: gi, head: true})
 		for li := range gs[gi].Listeners {
 			l := &gs[gi].Listeners[li]
@@ -238,18 +325,46 @@ func (m *model) setGroups(gs []scan.Group) {
 			delete(m.selected, pid)
 		}
 	}
+	// A refresh drops what was swept; failures stay marked.
+	for pid, s := range m.states {
+		if !alive[pid] || s != stateFailed {
+			delete(m.states, pid)
+			delete(m.errs, pid)
+		}
+	}
+	m.batch, m.batchDone = 0, 0
+	m.lastBatch = tally{}
 	m.cursor = min(m.cursor, max(len(m.items)-1, 0))
-	if len(m.items) > 1 && m.items[m.cursor].head && m.cursor == 0 {
-		m.cursor = 1
+	if len(m.items) > 1 && m.items[m.cursor].head {
+		m.cursor++
 	}
 	m.clampScroll()
 }
+
+func (m model) find(pid int) *scan.Listener {
+	for _, it := range m.items {
+		if it.l != nil && it.l.PID == pid {
+			return it.l
+		}
+	}
+	return nil
+}
+
+func (m model) live(l scan.Listener) bool { return m.states[l.PID] == stateLive }
 
 func (m *model) move(n int) {
 	if len(m.items) == 0 {
 		return
 	}
 	m.cursor = max(0, min(len(m.items)-1, m.cursor+n))
+	// Never rest on a spacer: keep going the way we were moving.
+	for m.items[m.cursor].spacer {
+		if n < 0 && m.cursor > 0 {
+			m.cursor--
+		} else {
+			m.cursor++
+		}
+	}
 	m.clampScroll()
 }
 
@@ -283,10 +398,12 @@ func (m *model) toggle() {
 		m.toggleGroup(it.group)
 		return
 	}
-	if m.selected[it.l.PID] {
-		delete(m.selected, it.l.PID)
-	} else {
-		m.selected[it.l.PID] = true
+	if m.live(*it.l) {
+		if m.selected[it.l.PID] {
+			delete(m.selected, it.l.PID)
+		} else {
+			m.selected[it.l.PID] = true
+		}
 	}
 	m.move(1)
 }
@@ -295,8 +412,13 @@ func (m *model) toggleGroup(gi int) {
 	if gi < 0 {
 		return
 	}
-	ls := m.groups[gi].Listeners
-	all := !slices.ContainsFunc(ls, func(l scan.Listener) bool { return !m.selected[l.PID] })
+	var ls []scan.Listener
+	for _, l := range m.groups[gi].Listeners {
+		if m.live(l) {
+			ls = append(ls, l)
+		}
+	}
+	all := len(ls) > 0 && !slices.ContainsFunc(ls, func(l scan.Listener) bool { return !m.selected[l.PID] })
 	for _, l := range ls {
 		if all {
 			delete(m.selected, l.PID)
@@ -306,274 +428,50 @@ func (m *model) toggleGroup(gi int) {
 	}
 }
 
-// targets are the selected listeners, or the one under the cursor if none are selected.
+// targets are the selected listeners, or the one under the cursor.
 func (m model) targets() []scan.Listener {
 	var out []scan.Listener
 	for _, g := range m.groups {
 		for _, l := range g.Listeners {
-			if m.selected[l.PID] {
+			if m.selected[l.PID] && m.live(l) {
 				out = append(out, l)
 			}
 		}
 	}
-	if len(out) == 0 && len(m.items) > 0 && !m.items[m.cursor].head {
-		out = append(out, *m.items[m.cursor].l)
+	if len(out) == 0 && len(m.items) > 0 {
+		if it := m.items[m.cursor]; !it.head && m.live(*it.l) {
+			out = append(out, *it.l)
+		}
 	}
 	return out
 }
 
-// stopSet is every pid to signal: the servers, then the launchers above them.
+// stopSet is every pid the confirm will signal: servers, then launchers.
 func (m model) stopSet() []int {
-	var pids, wrappers []int
-	for _, l := range m.targets() {
+	ts := m.targets()
+	var pids []int
+	for _, l := range ts {
 		pids = append(pids, l.PID)
-		wrappers = append(wrappers, l.Wrappers...)
 	}
-	for _, w := range wrappers {
-		if !slices.Contains(pids, w) {
-			pids = append(pids, w)
+	for _, l := range ts {
+		for _, p := range l.LauncherPIDs() {
+			if !slices.Contains(pids, p) {
+				pids = append(pids, p)
+			}
 		}
 	}
 	return pids
 }
 
-func summarize(rs []proc.Result) string {
-	var stopped, forced, failed int
-	for _, r := range rs {
-		switch {
-		case r.Err != nil:
-			failed++
-		case r.Killed:
-			forced++
-			stopped++
-		default:
-			stopped++
-		}
-	}
-	s := fmt.Sprintf("stopped %d", stopped)
-	if forced > 0 {
-		s += fmt.Sprintf(" (%d forced)", forced)
-	}
-	if failed > 0 {
-		s += fmt.Sprintf(", %d failed", failed)
-	}
-	return s
-}
-
-// ---- view ----
-
-const chrome = 2 + 1 + 1 + 1 + 1 + 2 // padding, header, gap, column header, gap, footer gap
-
-func (m model) listHeight() int {
-	return max(m.height-chrome-lipgloss.Height(m.help.View(m.keys)), 3)
-}
-
-func (m model) View() tea.View {
-	v := tea.NewView(m.render())
-	v.AltScreen = true
-	v.WindowTitle = "sweep"
-	return v
-}
-
-func (m model) render() string {
-	if m.width == 0 {
-		return ""
-	}
-	inner := m.width - 4
-	var b strings.Builder
-	b.WriteString(m.header(inner) + "\n\n")
-
-	switch {
-	case m.err != nil:
-		b.WriteString(m.st.errS.Render("scan failed: "+m.err.Error()) + "\n")
-	case m.mode == modeScanning && len(m.items) == 0:
-		b.WriteString(m.spinner.View() + m.st.dim.Render(" looking for listening ports…") + "\n")
-	case len(m.items) == 0:
-		b.WriteString(m.st.ok.Render("✓ ") + m.st.dim.Render("nothing you started is listening on a port.") + "\n")
-	default:
-		b.WriteString(m.columns(inner) + "\n")
-		b.WriteString(m.list(inner))
-	}
-
-	body := m.st.app.Render(b.String())
-	footer := lipgloss.NewStyle().Padding(0, 2).Render(m.footer())
-	screen := lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.NewStyle().Height(m.height-lipgloss.Height(footer)).Render(body),
-		footer)
-
-	if m.mode == modeConfirm || m.mode == modeStopping {
-		return m.overlay(screen)
-	}
-	return screen
-}
-
-func (m model) header(w int) string {
-	var n int
-	var rss int64
+// liveCount is what is still listening, counting ones being stopped.
+func (m model) liveCount() (n int, rss int64) {
 	for _, g := range m.groups {
-		n += len(g.Listeners)
 		for _, l := range g.Listeners {
-			rss += l.RSS
+			if s := m.states[l.PID]; s == stateLive || s == stateStopping {
+				n++
+				rss += l.RSS
+			}
 		}
 	}
-	left := m.st.badge.Render("sweep") + "  " + m.st.title.Render("Ports")
-	right := m.st.dim.Render(fmt.Sprintf("%d listening · %d dirs · %s", n, len(m.groups), format.Bytes(rss)))
-	if len(m.selected) > 0 {
-		right = m.st.check.Render(fmt.Sprintf("%d selected", len(m.selected))) + m.st.faint.Render("  ·  ") + right
-	}
-	gap := max(w-lipgloss.Width(left)-lipgloss.Width(right), 1)
-	return left + strings.Repeat(" ", gap) + right
-}
-
-// Column widths.
-const (
-	wMark = 2
-	wAge  = 5
-	wPID  = 8
-	wPort = 16
-	wRSS  = 7
-)
-
-func (m model) columns(w int) string {
-	cols := pad("", wMark) + pad("AGE", wAge) + pad("PID", wPID) + pad("PORT", wPort) + pad("MEM", wRSS) + "COMMAND"
-	return m.st.faint.Render(ansi.Truncate("   "+cols, w, ""))
-}
-
-func (m model) list(w int) string {
-	h := m.listHeight()
-	end := min(m.offset+h, len(m.items))
-	var rows []string
-	for i := m.offset; i < end; i++ {
-		rows = append(rows, m.row(i, w))
-	}
-	for len(rows) < h {
-		rows = append(rows, "")
-	}
-	if m.offset > 0 {
-		rows[0] = m.st.faint.Render(pad("", wMark) + "  ↑ more")
-	}
-	if end < len(m.items) {
-		rows[len(rows)-1] = m.st.faint.Render(pad("", wMark) + "  ↓ more")
-	}
-	return strings.Join(rows, "\n")
-}
-
-func (m model) row(i, w int) string {
-	it := m.items[i]
-	isCursor := i == m.cursor
-	var line string
-	if it.head {
-		g := m.groups[it.group]
-		mark := m.groupMark(g)
-		oldest := m.now.Sub(g.Oldest())
-		line = mark + " " + m.st.dir.Render(scan.ShortDir(g.Dir)) +
-			m.st.dirMeta.Render(fmt.Sprintf("  %d · oldest ", len(g.Listeners))) +
-			m.st.age(oldest).Render(format.Age(oldest))
-	} else {
-		l := it.l
-		mark := m.st.uncheck.Render("○")
-		if m.selected[l.PID] {
-			mark = m.st.check.Render("●")
-		}
-		age := m.now.Sub(l.Started)
-		ports := format.Ports(l.Addrs)
-		cmdW := max(w-2-wMark-wAge-wPID-wPort-wRSS, 10)
-		line = "  " + pad(mark, wMark) +
-			m.st.age(age).Render(pad(format.Age(age), wAge)) +
-			m.st.pid.Render(pad(fmt.Sprint(l.PID), wPID)) +
-			m.st.port.Render(pad(ansi.Truncate(ports, wPort-1, "…"), wPort)) +
-			m.st.rss.Render(pad(format.Bytes(l.RSS), wRSS)) +
-			m.st.cmd.Render(ansi.Truncate(format.Command(l.Command), cmdW, "…"))
-	}
-	if isCursor {
-		bar := lipgloss.NewStyle().Foreground(m.st.accent).Render("▌")
-		line = m.st.cursor.Width(w - 1).Render(ansi.Truncate(line, w-1, ""))
-		return bar + line
-	}
-	return " " + ansi.Truncate(line, w-1, "")
-}
-
-func (m model) groupMark(g scan.Group) string {
-	n := 0
-	for _, l := range g.Listeners {
-		if m.selected[l.PID] {
-			n++
-		}
-	}
-	switch {
-	case n == 0:
-		return m.st.uncheck.Render("▸")
-	case n == len(g.Listeners):
-		return m.st.check.Render("◆")
-	default:
-		return m.st.check.Render("◇")
-	}
-}
-
-func (m model) footer() string {
-	var status string
-	switch {
-	case m.mode == modeScanning && len(m.items) > 0:
-		status = m.spinner.View() + m.st.dim.Render(" refreshing…")
-	case m.status != "" && m.statusOK:
-		status = m.st.ok.Render("✓ " + m.status)
-	case m.status != "":
-		status = m.st.errS.Render("! " + m.status)
-	}
-	h := m.help.View(m.keys)
-	if status == "" {
-		return h
-	}
-	return status + "\n" + h
-}
-
-func (m model) overlay(bg string) string {
-	ts := m.targets()
-	pids := m.stopSet()
-	extra := len(pids) - len(ts)
-
-	var b strings.Builder
-	if m.mode == modeStopping {
-		b.WriteString(m.spinner.View() + m.st.title.Render(fmt.Sprintf(" stopping %d processes…", len(pids))))
-	} else {
-		title := fmt.Sprintf("Stop %d %s?", len(ts), plural(len(ts), "process", "processes"))
-		b.WriteString(m.st.modalTitle.Render(title) + "\n\n")
-		show := ts[:min(len(ts), 8)]
-		for _, l := range show {
-			b.WriteString(m.st.port.Render(pad(format.Ports(l.Addrs), 14)) +
-				m.st.cmd.Render(ansi.Truncate(format.Command(l.Command), 36, "…")) +
-				m.st.faint.Render("  "+scan.ShortDir(l.Cwd)) + "\n")
-		}
-		if len(ts) > len(show) {
-			b.WriteString(m.st.faint.Render(fmt.Sprintf("… and %d more", len(ts)-len(show))) + "\n")
-		}
-		if extra > 0 {
-			b.WriteString("\n" + m.st.dim.Render(fmt.Sprintf("also stops %d %s that started them (npm, pnpm, sh)",
-				extra, plural(extra, "launcher", "launchers"))) + "\n")
-		}
-		b.WriteString("\n" + m.st.dim.Render("SIGTERM, then SIGKILL after 3s") + "\n\n")
-		b.WriteString(m.st.danger.Render("y  stop") + "   " + m.st.dim.Render("n  cancel"))
-	}
-	box := m.st.modal.Render(b.String())
-	x := max((m.width-lipgloss.Width(box))/2, 0)
-	y := max((m.height-lipgloss.Height(box))/2, 0)
-	dimmed := m.st.faint.Render(ansi.Strip(bg))
-	return lipgloss.NewCompositor(
-		lipgloss.NewLayer(dimmed),
-		lipgloss.NewLayer(box).X(x).Y(y).Z(1),
-	).Render()
-}
-
-func pad(s string, w int) string {
-	if d := w - lipgloss.Width(s); d > 0 {
-		return s + strings.Repeat(" ", d)
-	}
-	return s
-}
-
-func plural(n int, one, many string) string {
-	if n == 1 {
-		return one
-	}
-	return many
+	return n, rss
 }
