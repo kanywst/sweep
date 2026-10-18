@@ -1,0 +1,29 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - misspell
+    - modernize
+    - revive
+    - gosec
+    - errorlint
+    - nolintlint
+    - usestdlibvars
+  settings:
+    gosec:
+      excludes:
+        # sweep runs lsof and ps by design; arguments are pids, not user input.
+        - G204
+  exclusions:
+    presets:
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/kanywst/sweep
