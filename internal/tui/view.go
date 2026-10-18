@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/kanywst/sweep/internal/format"
+	"github.com/kanywst/sweep/internal/proc"
 	"github.com/kanywst/sweep/internal/scan"
 )
 
@@ -186,7 +188,7 @@ func (m model) listenerRow(l scan.Listener, w int) string {
 	cmd := ansi.Truncate(format.Command(l.Command), cmdW, "…")
 
 	st := m.states[l.PID]
-	if st != stateLive {
+	if st != stateLive && st != stateFailed {
 		var mark, note string
 		switch st {
 		case stateStopping:
@@ -195,11 +197,9 @@ func (m model) listenerRow(l scan.Listener, w int) string {
 			mark, note = m.st.ok.Render("✓"), m.st.ok.Render("  stopped")
 		case stateForced:
 			mark, note = m.st.ok.Render("✓"), m.st.warn.Render("  stopped (SIGKILL)")
-		case stateFailed:
-			mark, note = m.st.fail.Render("✗"), m.st.fail.Render("  "+shortErr(m.errs[l.PID]))
 		}
 		ghost := m.st.ghost
-		if st == stateStopping || st == stateFailed {
+		if st == stateStopping {
 			ghost = m.st.dim
 		}
 		return "  " + pad(mark, wMark) +
@@ -207,6 +207,10 @@ func (m model) listenerRow(l scan.Listener, w int) string {
 	}
 
 	mark := m.st.uncheck.Render("○")
+	note := ""
+	if st == stateFailed {
+		mark, note = m.st.fail.Render("✗"), m.st.fail.Render("  "+shortErr(m.errs[l.PID]))
+	}
 	if m.selected[l.PID] {
 		mark = m.st.check.Render("●")
 	}
@@ -219,12 +223,14 @@ func (m model) listenerRow(l scan.Listener, w int) string {
 		m.st.dim.Render(pad(fmt.Sprint(l.PID), wPID)) +
 		portSt.Render(pad(ansi.Truncate(ports, wPort-1, "…"), wPort)) +
 		m.st.rss.Render(pad(format.Bytes(l.RSS), wRSS)) +
-		m.st.text.Render(cmd)
+		m.st.text.Render(cmd) + note
 }
 
 func (m model) footer(w int) string {
 	var status string
 	switch {
+	case m.hint != "":
+		status = m.st.warn.Render(m.hint)
 	case m.batch > 0 && m.batchDone < m.batch:
 		status = m.spinner.View() + m.st.dim.Render(fmt.Sprintf(" stopping %d of %d…", m.batchDone+1, m.batch))
 	case m.lastBatch.procs > 0 || m.lastBatch.failed > 0:
@@ -264,6 +270,9 @@ func (m model) summary(t tally) string {
 		}
 		b.WriteString(m.st.fail.Render(fmt.Sprintf("✗ %d failed", t.failed)))
 	}
+	if t.launcherFailed > 0 {
+		b.WriteString(m.st.warn.Render(fmt.Sprintf(" · %d %s not stopped", t.launcherFailed, plural(t.launcherFailed, "launcher", "launchers"))))
+	}
 	return b.String() + m.st.faint.Render("   r to refresh")
 }
 
@@ -292,7 +301,17 @@ func (m model) overlay(bg string) string {
 	var b strings.Builder
 	b.WriteString(m.st.modalTitle.Render(fmt.Sprintf("Stop %d %s?", len(ts), plural(len(ts), "process", "processes"))) + "\n\n")
 
-	show := ts[:min(len(ts), 8)]
+	// Fit the list to the terminal: the title, footer lines and border take ~12.
+	budget, shown := max(m.height-14, 2), 0
+	for _, l := range ts {
+		need := 1 + len(l.Launchers)
+		if shown > 0 && budget < need {
+			break
+		}
+		budget -= need
+		shown++
+	}
+	show := ts[:shown]
 	for _, l := range show {
 		ports := format.Ports(l.Addrs)
 		portSt := m.st.port
@@ -301,7 +320,7 @@ func (m model) overlay(bg string) string {
 		}
 		b.WriteString(portSt.Render(pad(ansi.Truncate(ports, 13, "…"), 14)) +
 			m.st.text.Render(pad(ansi.Truncate(format.Command(l.Command), 30, "…"), 32)) +
-			m.st.dim.Render(scan.ShortDir(l.Cwd)) + "\n")
+			m.st.dim.Render(ansi.Truncate(scan.ShortDir(l.Cwd), 24, "…")) + "\n")
 		for _, p := range l.Launchers {
 			b.WriteString(m.st.faint.Render(pad("", 14)+"↳ "+ansi.Truncate(format.Command(p.Command), 28, "…")) + "\n")
 		}
@@ -334,8 +353,11 @@ func splitDir(d string) (string, string) {
 }
 
 func shortErr(err error) string {
-	if err == nil {
+	switch {
+	case err == nil:
 		return "failed"
+	case errors.Is(err, proc.ErrChanged):
+		return "skipped: pid reused, press r"
 	}
 	return "failed: " + err.Error()
 }

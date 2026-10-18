@@ -69,15 +69,15 @@ func (b *Backend) Scan(context.Context) ([]scan.Group, error) {
 	return gs, nil
 }
 
-// Stop marks pids as gone.
-func (b *Backend) Stop(pids []int) []proc.Result {
+// Stop marks the targets as gone.
+func (b *Backend) Stop(targets []proc.Target) []proc.Result {
 	time.Sleep(600 * time.Millisecond)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	res := make([]proc.Result, len(pids))
-	for i, p := range pids {
-		b.stopped[p] = true
-		res[i] = proc.Result{PID: p}
+	res := make([]proc.Result, len(targets))
+	for i, t := range targets {
+		b.stopped[t.PID] = true
+		res[i] = proc.Result{PID: t.PID}
 	}
 	return res
 }

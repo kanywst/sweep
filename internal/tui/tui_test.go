@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -182,5 +183,60 @@ func TestAllClearAfterSweepingEverything(t *testing.T) {
 	}
 	if mm.View().WindowTitle != "sweep · all clear" {
 		t.Errorf("title = %q", mm.View().WindowTitle)
+	}
+}
+
+// Stopping the last row of a directory and refreshing used to leave the
+// cursor on the blank spacer row, where space dereferenced a nil listener.
+func TestRefreshNeverLeavesCursorOnSpacer(t *testing.T) {
+	gs := fixture()
+	gs[1].Listeners = append(gs[1].Listeners, scan.Listener{PID: 102, Addrs: []string{"[::1]:6006"}, Started: time.Now(), Command: "storybook", Cwd: "/work/app"})
+	gs = append([]scan.Group{gs[1]}, gs[0]) // /work/app (3 rows) first
+	var m tea.Model = newModel(System{})
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 110, Height: 30})
+	m, _ = m.Update(scanDoneMsg{groups: gs})
+	m = press(m, "j", "j") // third row of /work/app
+	gs2 := []scan.Group{{Dir: "/work/app", Listeners: gs[0].Listeners[:2]}, gs[1]}
+	m, _ = m.Update(scanDoneMsg{groups: gs2})
+	mm := m.(model)
+	if it := mm.items[mm.cursor]; it.spacer || it.head {
+		t.Fatalf("cursor on %+v", it)
+	}
+	_ = press(m, "space", "x") // must not panic
+}
+
+func TestFailedRowStaysSelectableAndNotAllClear(t *testing.T) {
+	m := press(loaded(t), "x", "y")
+	m, _ = m.Update(stoppedMsg{pid: 200, results: []proc.Result{{PID: 200, Err: proc.ErrChanged}}})
+	out := screen(m)
+	if strings.Contains(out, "All clear") || !strings.Contains(out, "skipped: pid reused") {
+		t.Fatalf("failed row should stay listed with its reason:\n%s", out)
+	}
+	m = press(m, "x")
+	if m.(model).mode != modeConfirm {
+		t.Error("a failed row should be stoppable again")
+	}
+}
+
+func TestQuitWaitsForStop(t *testing.T) {
+	m := press(loaded(t), "x", "y", "q")
+	if !strings.Contains(screen(m), "still stopping") {
+		t.Fatal("q during a stop should warn, not quit")
+	}
+}
+
+func TestModalFitsShortTerminal(t *testing.T) {
+	var m tea.Model = newModel(System{})
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 22})
+	var ls []scan.Listener
+	for i := range 12 {
+		ls = append(ls, scan.Listener{PID: 1000 + i, Addrs: []string{fmt.Sprintf("[::1]:%d", 3000+i)}, Started: time.Now(), Command: "vite", Cwd: "/w",
+			Launchers: []scan.Process{{PID: 2000 + i, Command: "pnpm dev"}}})
+	}
+	m, _ = m.Update(scanDoneMsg{groups: []scan.Group{{Dir: "/w", Listeners: ls}}})
+	m = press(m, "a", "x")
+	out := screen(m)
+	if !strings.Contains(out, "y  Stop 12") || !strings.Contains(out, "more") {
+		t.Fatalf("buttons must stay on screen:\n%s", out)
 	}
 }

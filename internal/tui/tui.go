@@ -23,7 +23,7 @@ import (
 // the demo one works on canned data.
 type Backend interface {
 	Scan(ctx context.Context) ([]scan.Group, error)
-	Stop(pids []int) []proc.Result
+	Stop(targets []proc.Target) []proc.Result
 }
 
 // System is the Backend for this machine.
@@ -34,8 +34,10 @@ func (s System) Scan(ctx context.Context) ([]scan.Group, error) {
 	return scan.Ports(ctx, scan.ExecRunner, s.Opt)
 }
 
-// Stop signals pids.
-func (System) Stop(pids []int) []proc.Result { return proc.Stop(pids, 3*time.Second) }
+// Stop signals targets, skipping any whose pid was reused since the scan.
+func (System) Stop(targets []proc.Target) []proc.Result {
+	return proc.Stop(targets, 3*time.Second, proc.SystemLookup)
+}
 
 // Run starts the interactive view.
 func Run(ctx context.Context, b Backend) error {
@@ -84,9 +86,9 @@ type (
 
 // tally is what has been swept.
 type tally struct {
-	procs, forced, failed int
-	rss                   int64
-	ports                 []string
+	procs, forced, failed, launcherFailed int
+	rss                                   int64
+	ports                                 []string
 }
 
 type model struct {
@@ -112,6 +114,7 @@ type model struct {
 	flashSeq  int
 	flashing  bool
 	noAnim    bool
+	hint      string // one-off message under the list
 
 	dark    bool
 	st      styles
@@ -155,9 +158,11 @@ func scanCmd(b Backend) tea.Cmd {
 }
 
 func stopCmd(b Backend, l scan.Listener) tea.Cmd {
-	return func() tea.Msg {
-		return stoppedMsg{pid: l.PID, results: b.Stop(append([]int{l.PID}, l.LauncherPIDs()...))}
+	var ts []proc.Target
+	for _, p := range l.Targets() {
+		ts = append(ts, proc.Target{PID: p.PID, Started: p.Started})
 	}
+	return func() tea.Msg { return stoppedMsg{pid: l.PID, results: b.Stop(ts)} }
 }
 
 func (m model) busy() bool { return m.mode == modeScanning || m.batchDone < m.batch }
@@ -207,6 +212,11 @@ func (m model) recordStop(msg stoppedMsg) (tea.Model, tea.Cmd) {
 	m.batchDone++
 	delete(m.selected, msg.pid)
 	server := msg.results[0]
+	for _, r := range msg.results[1:] {
+		if r.Err != nil {
+			m.lastBatch.launcherFailed++
+		}
+	}
 	if server.Err != nil {
 		m.states[msg.pid], m.errs[msg.pid] = stateFailed, server.Err
 		m.lastBatch.failed++
@@ -238,6 +248,7 @@ func (m model) recordStop(msg stoppedMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	m.hint = ""
 	if key.Matches(msg, m.keys.ForceQuit) {
 		return m, tea.Quit
 	}
@@ -256,6 +267,10 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	stopping := m.batchDone < m.batch
 	switch {
 	case key.Matches(msg, m.keys.Quit):
+		if stopping {
+			m.hint = "still stopping; quitting now could skip SIGKILL (ctrl+c to quit anyway)"
+			return m, nil
+		}
 		return m, tea.Quit
 	case key.Matches(msg, m.keys.Up):
 		m.move(-1)
@@ -299,6 +314,7 @@ func (m model) startStop() (tea.Model, tea.Cmd) {
 	m.lastBatch = tally{}
 	cmds := []tea.Cmd{m.spinner.Tick}
 	for _, l := range ts {
+		delete(m.errs, l.PID)
 		m.states[l.PID] = stateStopping
 		cmds = append(cmds, stopCmd(m.backend, l))
 	}
@@ -335,7 +351,7 @@ func (m *model) setGroups(gs []scan.Group) {
 	m.batch, m.batchDone = 0, 0
 	m.lastBatch = tally{}
 	m.cursor = min(m.cursor, max(len(m.items)-1, 0))
-	if len(m.items) > 1 && m.items[m.cursor].head {
+	for m.cursor < len(m.items)-1 && (m.items[m.cursor].spacer || m.items[m.cursor].head) {
 		m.cursor++
 	}
 	m.clampScroll()
@@ -350,7 +366,12 @@ func (m model) find(pid int) *scan.Listener {
 	return nil
 }
 
-func (m model) live(l scan.Listener) bool { return m.states[l.PID] == stateLive }
+// live reports whether l can be selected: still running, including ones a
+// stop failed on.
+func (m model) live(l scan.Listener) bool {
+	s := m.states[l.PID]
+	return s == stateLive || s == stateFailed
+}
 
 func (m *model) move(n int) {
 	if len(m.items) == 0 {
@@ -398,7 +419,7 @@ func (m *model) toggle() {
 		m.toggleGroup(it.group)
 		return
 	}
-	if m.live(*it.l) {
+	if it.l != nil && m.live(*it.l) {
 		if m.selected[it.l.PID] {
 			delete(m.selected, it.l.PID)
 		} else {
@@ -439,7 +460,7 @@ func (m model) targets() []scan.Listener {
 		}
 	}
 	if len(out) == 0 && len(m.items) > 0 {
-		if it := m.items[m.cursor]; !it.head && m.live(*it.l) {
+		if it := m.items[m.cursor]; it.l != nil && m.live(*it.l) {
 			out = append(out, *it.l)
 		}
 	}
@@ -467,7 +488,7 @@ func (m model) stopSet() []int {
 func (m model) liveCount() (n int, rss int64) {
 	for _, g := range m.groups {
 		for _, l := range g.Listeners {
-			if s := m.states[l.PID]; s == stateLive || s == stateStopping {
+			if s := m.states[l.PID]; s != stateStopped && s != stateForced {
 				n++
 				rss += l.RSS
 			}
