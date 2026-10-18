@@ -1,6 +1,12 @@
 # sweep
 
+[![CI](https://github.com/kanywst/sweep/actions/workflows/ci.yml/badge.svg)](https://github.com/kanywst/sweep/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/kanywst/sweep)](https://github.com/kanywst/sweep/releases)
+[![Go Reference](https://pkg.go.dev/badge/github.com/kanywst/sweep.svg)](https://pkg.go.dev/github.com/kanywst/sweep)
+
 Find what you left running and stop it.
+
+<img src="demo.gif" alt="sweep stopping forgotten dev servers" width="800">
 
 Dev servers, `python -m http.server`, `npx serve`: they pile up for weeks and hold ports. `sweep` lists every process with a listening port, grouped by the directory it was started from, oldest first, and stops the ones you pick, along with the `npm` / `pnpm` / `sh -c` launchers above them.
 
@@ -37,7 +43,9 @@ In the interactive view:
 | `?` | all keys |
 | `q` | quit |
 
-Stopping sends `SIGTERM`, waits 3 seconds, then sends `SIGKILL` to anything still running. Nothing is stopped without a confirmation.
+Stopping sends `SIGTERM`, waits 3 seconds, then sends `SIGKILL` to anything still running. Nothing is stopped without a confirmation, and `enter` never confirms one: press `y`. Stopped rows stay on screen, struck through, until you refresh, and the header keeps a running count of what you swept.
+
+`NO_COLOR` is respected. Set `SWEEP_NO_ANIM=1` to turn off the flash on the swept counter.
 
 ## Requirements
 
