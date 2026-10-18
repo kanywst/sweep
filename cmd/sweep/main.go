@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/kanywst/sweep/internal/demo"
 	"github.com/kanywst/sweep/internal/format"
 	"github.com/kanywst/sweep/internal/scan"
 	"github.com/kanywst/sweep/internal/tui"
@@ -69,7 +70,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if !term.IsTerminal(int(os.Stdout.Fd())) {
 			return printPorts(ctx, out, opt, *jsonOut)
 		}
-		return tui.Run(ctx, opt)
+		var b tui.Backend = tui.System{Opt: opt}
+		if os.Getenv("SWEEP_DEMO") != "" {
+			b = demo.New()
+		}
+		return tui.Run(ctx, b)
 	case "ports":
 		return printPorts(ctx, out, opt, *jsonOut)
 	case "version":
