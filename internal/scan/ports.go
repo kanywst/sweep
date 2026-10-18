@@ -196,9 +196,20 @@ func IsLauncher(cmdline string) bool {
 	case bin == "sh":
 		return len(f) > 1 && f[1] == "-c"
 	case strings.HasPrefix(bin, "node"):
-		return len(f) > 1 && slices.Contains(launcherScripts, filepath.Base(f[1]))
+		if len(f) < 2 {
+			return false
+		}
+		script := filepath.Base(f[1])
+		return slices.Contains(launcherScripts, script) || supervisesServer(script, f[2:])
 	}
 	return false
+}
+
+// supervisesServer reports dev commands that fork the real server as a child
+// and do nothing else. `next dev` neither restarts nor exits when its child is
+// killed (next 16 dist/cli/next-dev.js), so it would be left behind.
+func supervisesServer(script string, args []string) bool {
+	return script == "next" && len(args) > 0 && args[0] == "dev"
 }
 
 func parseLsofListen(out []byte) map[int]*Listener {

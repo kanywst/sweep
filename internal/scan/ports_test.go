@@ -156,6 +156,8 @@ func TestIsLauncher(t *testing.T) {
 		{"zsh -c npm exec vite", false},
 		{"-zsh", false},
 		{"node server.js", false},
+		{"node /Users/kt/site/node_modules/.bin/next dev", true},
+		{"node /Users/kt/site/node_modules/.bin/next start", false},
 	} {
 		if got := IsLauncher(tc.cmd); got != tc.want {
 			t.Errorf("IsLauncher(%q) = %v, want %v", tc.cmd, got, tc.want)
