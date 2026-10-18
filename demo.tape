@@ -70,6 +70,20 @@ Sleep 2.5s
 
 # Refresh: nothing left.
 Type "r"
-Sleep 3s
+Sleep 2.5s
+
+# The Caches tab: what each tool would free.
+Type "2"
+Sleep 2.5s
+Type "a"
+Sleep 400ms
+Type "x"
+Sleep 2.2s
+Escape
+Sleep 400ms
+
+# Dead clones.
+Type "3"
+Sleep 2.2s
 Type "q"
 Sleep 500ms
