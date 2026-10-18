@@ -96,7 +96,11 @@ func (m model) render() string {
 }
 
 func (m model) header(w int) string {
-	left := m.st.badge.Render("sweep") + "  " + m.st.tab.Render("Ports")
+	tabs := m.tabs
+	if tabs == "" {
+		tabs = m.st.tab.Render("Ports")
+	}
+	left := m.st.badge.Render("sweep") + "  " + tabs
 	n, rss := m.liveCount()
 	right := m.st.dim.Render(fmt.Sprintf("%d listening · %s", n, format.Bytes(rss)))
 	if m.swept.procs > 0 {

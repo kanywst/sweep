@@ -3,9 +3,13 @@ package demo
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/kanywst/sweep/internal/caches"
+	"github.com/kanywst/sweep/internal/clones"
 
 	"github.com/kanywst/sweep/internal/proc"
 	"github.com/kanywst/sweep/internal/scan"
@@ -16,11 +20,14 @@ import (
 type Backend struct {
 	mu      sync.Mutex
 	stopped map[int]bool
+	cleaned map[string]bool
 	start   time.Time
 }
 
 // New returns a demo backend anchored at the current time.
-func New() *Backend { return &Backend{stopped: map[int]bool{}, start: time.Now()} }
+func New() *Backend {
+	return &Backend{stopped: map[int]bool{}, cleaned: map[string]bool{}, start: time.Now()}
+}
 
 type entry struct {
 	dir       string
@@ -80,4 +87,65 @@ func (b *Backend) Stop(targets []proc.Target) []proc.Result {
 		res[i] = proc.Result{PID: t.PID}
 	}
 	return res
+}
+
+var demoCaches = []caches.Cache{
+	{Name: "Go build", Path: "~/Library/Caches/go-build", Size: 6 << 30, Clean: []string{"go", "clean", "-cache"}},
+	{Name: "Homebrew", Path: "~/Library/Caches/Homebrew", Size: 3500 << 20, Clean: []string{"brew", "cleanup", "--prune=all"}},
+	{Name: "uv", Path: "~/.cache/uv", Size: 3400 << 20, Clean: []string{"uv", "cache", "clean"}},
+	{Name: "Go modules", Path: "~/go/pkg/mod", Size: 750 << 20, Clean: []string{"go", "clean", "-modcache"}},
+	{Name: "npm", Path: "~/.npm/_cacache", Size: 716 << 20, Clean: []string{"npm", "cache", "clean", "--force"}},
+}
+
+var demoClones = []clones.Dead{
+	{Path: "~/oss/kong", GitDir: "/tmp/kong-gitdir", Size: 23 << 20},
+	{Path: "~/scratch/mcp-go", GitDir: "/tmp/mcp-go-gitdir", Size: 4 << 20},
+}
+
+// Caches returns canned caches that have not been cleaned.
+func (b *Backend) Caches(context.Context) []caches.Cache {
+	time.Sleep(500 * time.Millisecond)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []caches.Cache
+	for _, c := range demoCaches {
+		if !b.cleaned[c.Path] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Clean pretends to run the clean command.
+func (b *Backend) Clean(_ context.Context, c caches.Cache) error {
+	time.Sleep(700 * time.Millisecond)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.cleaned[c.Path] = true
+	return nil
+}
+
+// Clones returns canned dead clones that have not been trashed.
+func (b *Backend) Clones(context.Context) ([]clones.Dead, error) {
+	time.Sleep(400 * time.Millisecond)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []clones.Dead
+	for _, d := range demoClones {
+		if !b.cleaned[d.Path] {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// Trash pretends to move path to the trash.
+func (b *Backend) Trash(path string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if path == "" {
+		return errors.New("empty path")
+	}
+	b.cleaned[path] = true
+	return nil
 }

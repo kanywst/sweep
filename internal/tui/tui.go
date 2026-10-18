@@ -43,12 +43,6 @@ func (System) Stop(targets []proc.Target) []proc.Result {
 	return proc.Stop(targets, 3*time.Second, proc.SystemLookup)
 }
 
-// Run starts the interactive view.
-func Run(ctx context.Context, b Backend) error {
-	_, err := tea.NewProgram(newModel(b), tea.WithContext(ctx)).Run()
-	return err
-}
-
 type mode int
 
 const (
@@ -123,6 +117,7 @@ type model struct {
 	flashing  bool
 	noAnim    bool
 	hint      string // one-off message under the list
+	tabs      string // the tab bar, set by app
 
 	dark    bool
 	st      styles

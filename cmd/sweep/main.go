@@ -95,11 +95,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if *jsonOut || !term.IsTerminal(int(os.Stdout.Fd())) {
 			return printPorts(ctx, out, opt, *jsonOut)
 		}
-		var b tui.Backend = tui.System{Opt: opt}
+		var m tui.Machine = tui.System{Opt: opt}
 		if os.Getenv("SWEEP_DEMO") != "" {
-			b = demo.New()
+			m = demo.New()
 		}
-		return tui.Run(ctx, b)
+		return tui.RunMachine(ctx, m)
 	case "ports":
 		return printPorts(ctx, out, opt, *jsonOut)
 	case "stop":
