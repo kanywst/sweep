@@ -1,19 +1,21 @@
-// Package scan finds things on this machine that are left running or left on disk.
+// Package scan finds things on this machine that are left running.
 package scan
 
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kanywst/sweep/internal/ps"
 )
 
 // Listener is a process that holds at least one listening TCP socket.
@@ -31,11 +33,18 @@ type Listener struct {
 	Launchers []Process `json:"launchers,omitempty"`
 }
 
-// Process is a pid and its command line.
+// Process is a pid as it was when scanned.
 type Process struct {
-	PID     int    `json:"pid"`
-	Command string `json:"command"`
+	PID     int       `json:"pid"`
+	Command string    `json:"command"`
+	Started time.Time `json:"started"`
 }
+
+// Proc returns the listener as a Process.
+func (l Listener) Proc() Process { return Process{PID: l.PID, Command: l.Command, Started: l.Started} }
+
+// Targets is the listener followed by its launchers.
+func (l Listener) Targets() []Process { return append([]Process{l.Proc()}, l.Launchers...) }
 
 // LauncherPIDs returns the pids of l.Launchers.
 func (l Listener) LauncherPIDs() []int {
@@ -45,9 +54,6 @@ func (l Listener) LauncherPIDs() []int {
 	}
 	return out
 }
-
-// Age is how long the process has been running.
-func (l Listener) Age(now time.Time) time.Duration { return now.Sub(l.Started) }
 
 // Group is the listeners started from one directory.
 type Group struct {
@@ -67,14 +73,10 @@ func (g Group) Oldest() time.Time {
 }
 
 // Runner runs an external command and returns its stdout.
-type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
+type Runner = ps.Runner
 
-// ExecRunner runs commands with a C locale so ps output parses the same everywhere.
-func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
-	return cmd.Output()
-}
+// ExecRunner runs lsof and ps by absolute path in the C locale.
+var ExecRunner Runner = ps.Exec
 
 // PortOptions controls Ports.
 type PortOptions struct {
@@ -86,10 +88,16 @@ type PortOptions struct {
 // Ports lists processes with listening TCP sockets, grouped by working
 // directory, oldest group first.
 func Ports(ctx context.Context, run Runner, opt PortOptions) ([]Group, error) {
-	// lsof exits 1 when it finds nothing; treat empty output as no listeners.
 	out, err := run(ctx, "lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcn")
-	if err != nil && len(out) == 0 {
-		return nil, nil
+	if errors.Is(err, ps.ErrNotFound) {
+		return nil, err
+	}
+	if err != nil {
+		// lsof exits 1 with no output when nothing matches; anything else is
+		// a real failure and must not read as "all clear".
+		if ee, ok := errors.AsType[*exec.ExitError](err); !ok || ee.ExitCode() != 1 || len(out) != 0 {
+			return nil, fmt.Errorf("lsof: %w", err)
+		}
 	}
 	ls := parseLsofListen(out)
 	if len(ls) == 0 {
@@ -105,40 +113,20 @@ func Ports(ctx context.Context, run Runner, opt PortOptions) ([]Group, error) {
 		}
 	}
 
-	procs, err := psInfo(ctx, run, pids)
+	table, err := ps.Table(ctx, run)
 	if err != nil {
 		return nil, err
 	}
-	var parents []int
-	for _, p := range procs {
-		parents = append(parents, p.ppid)
-	}
-	pp, _ := psInfo(ctx, run, parents)
-	for k, v := range pp {
-		if _, ok := procs[k]; !ok {
-			procs[k] = v
-		}
-	}
-	// One more level, for pnpm -> sh -c -> node.
-	var grand []int
-	for _, p := range pp {
-		grand = append(grand, p.ppid)
-	}
-	gp, _ := psInfo(ctx, run, grand)
-	for k, v := range gp {
-		if _, ok := procs[k]; !ok {
-			procs[k] = v
-		}
-	}
+	children := ps.Children(table)
 
 	var flat []Listener
 	for pid, l := range ls {
-		p, ok := procs[pid]
+		p, ok := table[pid]
 		if !ok {
 			continue // exited between lsof and ps
 		}
-		l.PPID, l.Started, l.RSS, l.Command = p.ppid, p.started, p.rss, p.command
-		l.Launchers = launchers(procs, l.PPID, ls)
+		l.PPID, l.Started, l.RSS, l.Command = p.PPID, p.Started, p.RSS, p.Command
+		l.Launchers = launchers(table, children, pid, ls)
 		if !opt.All && (l.Cwd == "" || l.Cwd == "/") {
 			continue
 		}
@@ -163,28 +151,54 @@ func group(ls []Listener) []Group {
 	return gs
 }
 
-// wrapperRe matches launcher processes that only exist to run a dev server.
-var wrapperRe = regexp.MustCompile(`(^|/)(npm|pnpm|yarn|npx|bun)(\s|$)|pnpm\.mjs|npm exec|^(/bin/)?sh -c `)
-
-// launchers walks up from ppid while the parent is a launcher that holds no
-// socket of its own, so stopping a dev server also stops what started it.
-func launchers(procs map[int]psProc, ppid int, listeners map[int]*Listener) []Process {
+// launchers walks up from pid while each parent is a launcher that does
+// nothing but run the process below it: it must look like npm / pnpm / yarn /
+// npx / bun run / sh -c by program name, have exactly one child, and hold no
+// socket. A parent with a second child (pnpm -r, a tmux server, a shell
+// running two jobs) is never stopped, because that would take the others down.
+func launchers(table map[int]ps.Proc, children map[int]int, pid int, listeners map[int]*Listener) []Process {
 	var out []Process
+	cur := table[pid]
 	for range 3 {
-		if ppid <= 1 {
+		parent, ok := table[cur.PPID]
+		if !ok || parent.PID <= 1 || children[parent.PID] != 1 || !IsLauncher(parent.Command) {
 			break
 		}
-		p, ok := procs[ppid]
-		if !ok || !wrapperRe.MatchString(p.command) {
+		if _, listening := listeners[parent.PID]; listening {
 			break
 		}
-		if _, listening := listeners[ppid]; listening {
-			break
-		}
-		out = append(out, Process{PID: ppid, Command: p.command})
-		ppid = p.ppid
+		out = append(out, Process{PID: parent.PID, Command: parent.Command, Started: parent.Started})
+		cur = parent
 	}
 	return out
+}
+
+var (
+	launcherBins    = []string{"npm", "pnpm", "yarn", "npx", "pnpx"}
+	launcherScripts = []string{"npm-cli.js", "npx-cli.js", "pnpm.cjs", "pnpm.mjs", "pnpm.js", "yarn.js", "yarn.cjs"}
+)
+
+// IsLauncher reports whether cmdline is a package-manager or shell process
+// whose job is to start another program. It looks only at the program and
+// the script it runs, never at arbitrary arguments, so "tmux new npm exec x"
+// or "nvim scripts/npm" do not count.
+func IsLauncher(cmdline string) bool {
+	f := strings.Fields(cmdline)
+	if len(f) == 0 {
+		return false
+	}
+	bin := filepath.Base(f[0])
+	switch {
+	case slices.Contains(launcherBins, bin):
+		return true
+	case bin == "bun":
+		return len(f) > 1 && (f[1] == "run" || f[1] == "x")
+	case bin == "sh":
+		return len(f) > 1 && f[1] == "-c"
+	case strings.HasPrefix(bin, "node"):
+		return len(f) > 1 && slices.Contains(launcherScripts, filepath.Base(f[1]))
+	}
+	return false
 }
 
 func parseLsofListen(out []byte) map[int]*Listener {
@@ -240,50 +254,6 @@ func parseLsofCwd(out []byte) map[int]string {
 	return m
 }
 
-type psProc struct {
-	ppid    int
-	rss     int64
-	started time.Time
-	command string
-}
-
-const lstartLayout = "Mon Jan 2 15:04:05 2006"
-
-func psInfo(ctx context.Context, run Runner, pids []int) (map[int]psProc, error) {
-	pids = uniq(pids)
-	if len(pids) == 0 {
-		return map[int]psProc{}, nil
-	}
-	out, err := run(ctx, "ps", "-o", "pid=,ppid=,rss=,lstart=,command=", "-p", joinInts(pids))
-	if err != nil && len(out) == 0 {
-		// ps exits 1 if any pid is gone; only fail when nothing came back.
-		return map[int]psProc{}, nil
-	}
-	return parsePs(out)
-}
-
-func parsePs(out []byte) (map[int]psProc, error) {
-	m := map[int]psProc{}
-	for line := range strings.Lines(string(out)) {
-		f := strings.Fields(line)
-		if len(f) < 9 {
-			continue
-		}
-		pid, err1 := strconv.Atoi(f[0])
-		ppid, err2 := strconv.Atoi(f[1])
-		rss, err3 := strconv.ParseInt(f[2], 10, 64)
-		if err1 != nil || err2 != nil || err3 != nil {
-			continue
-		}
-		started, err := time.ParseInLocation(lstartLayout, strings.Join(f[3:8], " "), time.Local)
-		if err != nil {
-			return nil, fmt.Errorf("parse ps start time %q: %w", strings.Join(f[3:8], " "), err)
-		}
-		m[pid] = psProc{ppid: ppid, rss: rss * 1024, started: started, command: strings.Join(f[8:], " ")}
-	}
-	return m, nil
-}
-
 // ShortDir replaces the home directory prefix with "~".
 func ShortDir(dir string) string {
 	home, err := os.UserHomeDir()
@@ -305,10 +275,4 @@ func joinInts(xs []int) string {
 		s[i] = strconv.Itoa(x)
 	}
 	return strings.Join(s, ",")
-}
-
-func uniq(xs []int) []int {
-	xs = slices.DeleteFunc(slices.Clone(xs), func(x int) bool { return x <= 0 })
-	slices.Sort(xs)
-	return slices.Compact(xs)
 }
