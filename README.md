@@ -7,8 +7,14 @@ Dev servers, `python -m http.server`, `npx serve`: they pile up for weeks and ho
 ## Install
 
 ```sh
+# Homebrew (macOS, Linux)
+brew install kanywst/tap/sweep
+
+# Go
 go install github.com/kanywst/sweep/cmd/sweep@latest
 ```
+
+Linux `.deb` / `.rpm` packages and archives are on the [releases page](https://github.com/kanywst/sweep/releases). Release checksums are signed with cosign, and archives carry build provenance (`gh attestation verify <archive> -R kanywst/sweep`).
 
 ## Use
 
