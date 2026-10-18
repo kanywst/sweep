@@ -20,9 +20,27 @@ import (
 	"github.com/kanywst/sweep/internal/scan"
 )
 
+// Backend finds and stops processes. The real one shells out to lsof and ps;
+// the demo one works on canned data.
+type Backend interface {
+	Scan(ctx context.Context) ([]scan.Group, error)
+	Stop(pids []int) []proc.Result
+}
+
+// System is the Backend for this machine.
+type System struct{ Opt scan.PortOptions }
+
+// Scan lists listening processes.
+func (s System) Scan(ctx context.Context) ([]scan.Group, error) {
+	return scan.Ports(ctx, scan.ExecRunner, s.Opt)
+}
+
+// Stop signals pids.
+func (System) Stop(pids []int) []proc.Result { return proc.Stop(pids, 3*time.Second) }
+
 // Run starts the interactive view.
-func Run(ctx context.Context, opt scan.PortOptions) error {
-	_, err := tea.NewProgram(newModel(opt), tea.WithContext(ctx)).Run()
+func Run(ctx context.Context, b Backend) error {
+	_, err := tea.NewProgram(newModel(b), tea.WithContext(ctx)).Run()
 	return err
 }
 
@@ -50,7 +68,7 @@ type (
 )
 
 type model struct {
-	opt      scan.PortOptions
+	backend  Backend
 	mode     mode
 	groups   []scan.Group
 	items    []item
@@ -71,9 +89,9 @@ type model struct {
 	spinner spinner.Model
 }
 
-func newModel(opt scan.PortOptions) model {
+func newModel(b Backend) model {
 	m := model{
-		opt:      opt,
+		backend:  b,
 		selected: map[int]bool{},
 		dark:     true,
 		keys:     defaultKeys(),
@@ -90,20 +108,20 @@ func (m *model) applyTheme() {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(scanCmd(m.opt), tea.RequestBackgroundColor, m.spinner.Tick)
+	return tea.Batch(scanCmd(m.backend), tea.RequestBackgroundColor, m.spinner.Tick)
 }
 
-func scanCmd(opt scan.PortOptions) tea.Cmd {
+func scanCmd(b Backend) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		gs, err := scan.Ports(ctx, scan.ExecRunner, opt)
+		gs, err := b.Scan(ctx)
 		return scanDoneMsg{gs, err}
 	}
 }
 
-func stopCmd(pids []int) tea.Cmd {
-	return func() tea.Msg { return stopDoneMsg{proc.Stop(pids, 3*time.Second)} }
+func stopCmd(b Backend, pids []int) tea.Cmd {
+	return func() tea.Msg { return stopDoneMsg{b.Stop(pids)} }
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -142,7 +160,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.mode = modeScanning
-		return m, tea.Batch(scanCmd(m.opt), m.spinner.Tick)
+		return m, tea.Batch(scanCmd(m.backend), m.spinner.Tick)
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
@@ -159,7 +177,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Confirm):
 			pids := m.stopSet()
 			m.mode = modeStopping
-			return m, tea.Batch(stopCmd(pids), m.spinner.Tick)
+			return m, tea.Batch(stopCmd(m.backend, pids), m.spinner.Tick)
 		case key.Matches(msg, m.keys.Cancel):
 			m.mode = modeList
 		}
@@ -195,7 +213,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case key.Matches(msg, m.keys.Refresh):
 		m.mode, m.status = modeScanning, ""
-		return m, tea.Batch(scanCmd(m.opt), m.spinner.Tick)
+		return m, tea.Batch(scanCmd(m.backend), m.spinner.Tick)
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
 		m.clampScroll()

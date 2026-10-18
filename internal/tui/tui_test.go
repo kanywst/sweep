@@ -44,7 +44,7 @@ func fixture() []scan.Group {
 
 func loaded(t *testing.T) tea.Model {
 	t.Helper()
-	var m tea.Model = newModel(scan.PortOptions{})
+	var m tea.Model = newModel(System{})
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 110, Height: 30})
 	m, _ = m.Update(scanDoneMsg{groups: fixture()})
 	return m
@@ -62,7 +62,7 @@ func TestListRendersGroupsAndRows(t *testing.T) {
 }
 
 func TestEmptyState(t *testing.T) {
-	var m tea.Model = newModel(scan.PortOptions{})
+	var m tea.Model = newModel(System{})
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	m, _ = m.Update(scanDoneMsg{})
 	if out := screen(m); !strings.Contains(out, "nothing you started is listening") {
