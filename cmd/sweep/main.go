@@ -46,28 +46,41 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, out io.Writer) error {
+	// Flags may come before or after the command: take the first bare word as
+	// the command and parse everything else as flags.
 	cmd := ""
-	if len(args) > 0 && (args[0] == "-v" || args[0] == "--version") {
-		args[0] = "version"
-	}
-	if len(args) > 0 && args[0] != "" && args[0][0] != '-' {
-		cmd, args = args[0], args[1:]
+	var flags []string
+	for _, a := range args {
+		if cmd == "" && a != "" && a[0] != '-' {
+			cmd = a
+			continue
+		}
+		flags = append(flags, a)
 	}
 	fs := flag.NewFlagSet("sweep", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	fs.SetOutput(io.Discard)
 	jsonOut := fs.Bool("json", false, "print JSON")
 	all := fs.Bool("all", false, "include system processes")
-	if err := fs.Parse(args); err != nil {
+	showVersion := fs.Bool("version", false, "print the version")
+	fs.BoolVar(showVersion, "v", false, "print the version")
+	if err := fs.Parse(flags); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return nil
+			cmd = "help"
+		} else {
+			return fmt.Errorf("%w (try sweep help)", err)
 		}
-		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q (try sweep help)", fs.Arg(0))
+	}
+	if *showVersion {
+		cmd = "version"
 	}
 	opt := scan.PortOptions{All: *all}
 
 	switch cmd {
 	case "":
-		if !term.IsTerminal(int(os.Stdout.Fd())) {
+		if *jsonOut || !term.IsTerminal(int(os.Stdout.Fd())) {
 			return printPorts(ctx, out, opt, *jsonOut)
 		}
 		var b tui.Backend = tui.System{Opt: opt}
@@ -81,8 +94,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		_, err := fmt.Fprintln(out, "sweep", version.String())
 		return err
 	case "help":
-		fmt.Fprint(out, usage)
-		return nil
+		_, err := fmt.Fprint(out, usage)
+		return err
 	default:
 		return fmt.Errorf("unknown command %q (try sweep help)", cmd)
 	}
