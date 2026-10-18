@@ -28,7 +28,7 @@ const usage = `sweep finds what you left running and helps you stop it.
 Usage:
   sweep              open the interactive view
   sweep ports        list processes with listening ports, grouped by directory
-  sweep version      print the version
+  sweep version      print the version (also -v, --version)
 
 Flags for ports:
   --json             print JSON
@@ -46,6 +46,9 @@ func main() {
 
 func run(ctx context.Context, args []string, out io.Writer) error {
 	cmd := ""
+	if len(args) > 0 && (args[0] == "-v" || args[0] == "--version") {
+		args[0] = "version"
+	}
 	if len(args) > 0 && args[0] != "" && args[0][0] != '-' {
 		cmd, args = args[0], args[1:]
 	}
