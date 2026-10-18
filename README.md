@@ -43,13 +43,13 @@ In the interactive view:
 | `?` | all keys |
 | `q` | quit |
 
-Stopping sends `SIGTERM`, waits 3 seconds, then sends `SIGKILL` to anything still running. Nothing is stopped without a confirmation, and `enter` never confirms one: press `y`. Stopped rows stay on screen, struck through, until you refresh, and the header keeps a running count of what you swept.
+Stopping sends `SIGTERM`, waits 3 seconds, then sends `SIGKILL` to anything still running. Right before each signal sweep checks that the pid still belongs to the process it scanned (same start time), so a pid reused while the view sat open is skipped, not signalled. A launcher such as `pnpm dev` or `sh -c` is stopped along with its server only when it has no other child, so a `pnpm -r` running several servers, or a tmux server, is never taken down. Nothing is stopped without a confirmation, and `enter` never confirms one: press `y`. Stopped rows stay on screen, struck through, until you refresh, and the header keeps a running count of what you swept.
 
 `NO_COLOR` is respected. Set `SWEEP_NO_ANIM=1` to turn off the flash on the swept counter.
 
 ## Requirements
 
-macOS or Linux with `lsof` and `ps`.
+macOS or Linux with `lsof` and `ps` (the `lsof` and `procps` packages on Linux; the `.deb` and `.rpm` depend on them). sweep runs them from `/usr/sbin`, `/usr/bin` or `/bin` directly, never through `PATH`.
 
 ## Development
 
