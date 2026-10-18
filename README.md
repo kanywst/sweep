@@ -7,7 +7,7 @@ Dev servers, `python -m http.server`, `npx serve`: they pile up for weeks and ho
 ## Install
 
 ```sh
-# Homebrew (macOS, Linux)
+# Homebrew (macOS)
 brew install kanywst/tap/sweep
 
 # Go
