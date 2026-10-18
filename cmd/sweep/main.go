@@ -29,11 +29,16 @@ const usage = `sweep finds what you left running and helps you stop it.
 Usage:
   sweep              open the interactive view
   sweep ports        list processes with listening ports, grouped by directory
+  sweep stop :5173   stop what listens on a port (or give a pid), with its launchers
   sweep version      print the version (also -v, --version)
 
 Flags for ports:
   --json             print JSON
   --all              include system processes (working directory "/")
+
+Flags for stop:
+  --dry-run          print what would be stopped and stop nothing
+  -y, --yes          do not ask for confirmation (required when not a terminal)
 `
 
 func main() {
@@ -48,19 +53,26 @@ func main() {
 func run(ctx context.Context, args []string, out io.Writer) error {
 	// Flags may come before or after the command: take the first bare word as
 	// the command and parse everything else as flags.
+	// Every flag is a boolean, so a bare word is never a flag value.
 	cmd := ""
-	var flags []string
+	var flags, rest []string
 	for _, a := range args {
-		if cmd == "" && a != "" && a[0] != '-' {
+		switch {
+		case a != "" && a[0] == '-':
+			flags = append(flags, a)
+		case cmd == "":
 			cmd = a
-			continue
+		default:
+			rest = append(rest, a)
 		}
-		flags = append(flags, a)
 	}
 	fs := flag.NewFlagSet("sweep", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	jsonOut := fs.Bool("json", false, "print JSON")
 	all := fs.Bool("all", false, "include system processes")
+	dryRun := fs.Bool("dry-run", false, "print what would be stopped")
+	yes := fs.Bool("yes", false, "stop without asking")
+	fs.BoolVar(yes, "y", false, "stop without asking")
 	showVersion := fs.Bool("version", false, "print the version")
 	fs.BoolVar(showVersion, "v", false, "print the version")
 	if err := fs.Parse(flags); err != nil {
@@ -70,8 +82,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return fmt.Errorf("%w (try sweep help)", err)
 		}
 	}
-	if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected argument %q (try sweep help)", fs.Arg(0))
+	if len(rest) > 0 && cmd != "stop" {
+		return fmt.Errorf("unexpected argument %q (try sweep help)", rest[0])
 	}
 	if *showVersion {
 		cmd = "version"
@@ -90,6 +102,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return tui.Run(ctx, b)
 	case "ports":
 		return printPorts(ctx, out, opt, *jsonOut)
+	case "stop":
+		return stopCommand(ctx, out, rest, systemStopOptions(*dryRun, *yes))
 	case "version":
 		_, err := fmt.Fprintln(out, "sweep", version.String())
 		return err
