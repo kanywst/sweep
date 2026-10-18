@@ -50,9 +50,18 @@ func SystemLookup(pids []int) (map[int]ps.Proc, error) {
 func Stop(targets []Target, grace time.Duration, lookup Lookup) []Result {
 	res := make([]Result, len(targets))
 	pids := make([]int, len(targets))
+	hs := make([]*handle, len(targets))
 	for i, t := range targets {
 		res[i].PID, pids[i] = t.PID, t.PID
+		if t.PID > 1 {
+			hs[i] = open(t.PID) // before the check, so the check covers what we signal
+		}
 	}
+	defer func() {
+		for _, h := range hs {
+			h.close()
+		}
+	}()
 
 	cur, err := lookup(pids)
 	if err != nil {
@@ -70,7 +79,7 @@ func Stop(targets []Target, grace time.Duration, lookup Lookup) []Result {
 		case exited:
 			res[i].Gone = true
 		case running:
-			if err := syscall.Kill(t.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			if err := hs[i].signal(t.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 				res[i].Err = err
 			}
 		}
@@ -99,7 +108,7 @@ func Stop(targets []Target, grace time.Duration, lookup Lookup) []Result {
 			continue
 		}
 		res[i].Killed = true
-		if err := syscall.Kill(t.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		if err := hs[i].signal(t.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			res[i].Err = err
 		}
 	}
