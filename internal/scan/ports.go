@@ -18,15 +18,32 @@ import (
 
 // Listener is a process that holds at least one listening TCP socket.
 type Listener struct {
-	PID      int       `json:"pid"`
-	PPID     int       `json:"ppid"`
-	Name     string    `json:"name"`
-	Command  string    `json:"command"`
-	Cwd      string    `json:"cwd"`
-	Addrs    []string  `json:"addrs"`
-	Started  time.Time `json:"started"`
-	RSS      int64     `json:"rss_bytes"`
-	Wrappers []int     `json:"wrapper_pids,omitempty"`
+	PID     int       `json:"pid"`
+	PPID    int       `json:"ppid"`
+	Name    string    `json:"name"`
+	Command string    `json:"command"`
+	Cwd     string    `json:"cwd"`
+	Addrs   []string  `json:"addrs"`
+	Started time.Time `json:"started"`
+	RSS     int64     `json:"rss_bytes"`
+	// Launchers are the npm / pnpm / sh -c processes above this one that
+	// exist only to run it. Stopping the listener stops them too.
+	Launchers []Process `json:"launchers,omitempty"`
+}
+
+// Process is a pid and its command line.
+type Process struct {
+	PID     int    `json:"pid"`
+	Command string `json:"command"`
+}
+
+// LauncherPIDs returns the pids of l.Launchers.
+func (l Listener) LauncherPIDs() []int {
+	out := make([]int, len(l.Launchers))
+	for i, p := range l.Launchers {
+		out[i] = p.PID
+	}
+	return out
 }
 
 // Age is how long the process has been running.
@@ -121,7 +138,7 @@ func Ports(ctx context.Context, run Runner, opt PortOptions) ([]Group, error) {
 			continue // exited between lsof and ps
 		}
 		l.PPID, l.Started, l.RSS, l.Command = p.ppid, p.started, p.rss, p.command
-		l.Wrappers = wrappers(procs, l.PPID, ls)
+		l.Launchers = launchers(procs, l.PPID, ls)
 		if !opt.All && (l.Cwd == "" || l.Cwd == "/") {
 			continue
 		}
@@ -149,10 +166,10 @@ func group(ls []Listener) []Group {
 // wrapperRe matches launcher processes that only exist to run a dev server.
 var wrapperRe = regexp.MustCompile(`(^|/)(npm|pnpm|yarn|npx|bun)(\s|$)|pnpm\.mjs|npm exec|^(/bin/)?sh -c `)
 
-// wrappers walks up from ppid while the parent is a launcher that holds no
+// launchers walks up from ppid while the parent is a launcher that holds no
 // socket of its own, so stopping a dev server also stops what started it.
-func wrappers(procs map[int]psProc, ppid int, listeners map[int]*Listener) []int {
-	var out []int
+func launchers(procs map[int]psProc, ppid int, listeners map[int]*Listener) []Process {
+	var out []Process
 	for range 3 {
 		if ppid <= 1 {
 			break
@@ -164,7 +181,7 @@ func wrappers(procs map[int]psProc, ppid int, listeners map[int]*Listener) []int
 		if _, listening := listeners[ppid]; listening {
 			break
 		}
-		out = append(out, ppid)
+		out = append(out, Process{PID: ppid, Command: p.command})
 		ppid = p.ppid
 	}
 	return out

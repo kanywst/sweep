@@ -81,11 +81,14 @@ func TestPortsGroupsByDirOldestFirst(t *testing.T) {
 	if !vite.Started.Equal(want) {
 		t.Errorf("started = %v, want %v", vite.Started, want)
 	}
-	if fmt.Sprint(vite.Wrappers) != "[401 400]" {
-		t.Errorf("wrappers = %v, want [401 400]", vite.Wrappers)
+	if fmt.Sprint(vite.LauncherPIDs()) != "[401 400]" {
+		t.Errorf("launchers = %v, want [401 400]", vite.Launchers)
 	}
-	if len(gs[0].Listeners[0].Wrappers) != 0 {
-		t.Errorf("python under launchd should have no wrappers, got %v", gs[0].Listeners[0].Wrappers)
+	if vite.Launchers[1].Command != "node /opt/homebrew/lib/node_modules/pnpm/bin/pnpm.mjs dev" {
+		t.Errorf("launcher command = %q", vite.Launchers[1].Command)
+	}
+	if len(gs[0].Listeners[0].Launchers) != 0 {
+		t.Errorf("python under launchd should have no launchers, got %v", gs[0].Listeners[0].Launchers)
 	}
 }
 

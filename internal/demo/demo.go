@@ -23,26 +23,26 @@ type Backend struct {
 func New() *Backend { return &Backend{stopped: map[int]bool{}, start: time.Now()} }
 
 type entry struct {
-	dir      string
-	pid      int
-	addr     string
-	age      time.Duration
-	mem      int64
-	cmd      string
-	wrappers []int
+	dir       string
+	pid       int
+	addr      string
+	age       time.Duration
+	mem       int64
+	cmd       string
+	launchers []scan.Process
 }
 
 const day = 24 * time.Hour
 
 var world = []entry{
-	{"~/work/shop", 41207, "[::1]:5173", 23 * day, 182 << 20, "node node_modules/.bin/vite dev", []int{41205, 41203}},
-	{"~/work/shop", 41388, "[::1]:4173", 23 * day, 96 << 20, "node node_modules/.bin/vite preview", []int{41386}},
-	{"~/work/shop", 52011, "*:6006", 19 * day, 410 << 20, "node node_modules/.bin/storybook dev -p 6006", []int{52009}},
-	{"~/blog", 38842, "*:4321", 16 * day, 74 << 20, "node node_modules/.bin/astro dev --host", []int{38840}},
+	{"~/work/shop", 41207, "[::1]:5173", 23 * day, 182 << 20, "node node_modules/.bin/vite dev", []scan.Process{{PID: 41205, Command: "sh -c vite"}, {PID: 41203, Command: "pnpm dev"}}},
+	{"~/work/shop", 41388, "[::1]:4173", 23 * day, 96 << 20, "node node_modules/.bin/vite preview", []scan.Process{{PID: 41386, Command: "pnpm preview"}}},
+	{"~/work/shop", 52011, "*:6006", 19 * day, 410 << 20, "node node_modules/.bin/storybook dev -p 6006", []scan.Process{{PID: 52009, Command: "npm run storybook"}}},
+	{"~/blog", 38842, "*:4321", 16 * day, 74 << 20, "node node_modules/.bin/astro dev --host", []scan.Process{{PID: 38840, Command: "npm run dev"}}},
 	{"~/scratch/site", 27115, "*:8000", 12 * day, 21 << 20, "python3 -m http.server 8000", nil},
 	{"~/work/api", 63390, "127.0.0.1:8080", 4 * day, 58 << 20, "air", nil},
 	{"~/work/api", 63402, "127.0.0.1:5432", 4 * day, 132 << 20, "postgres -D .pgdata", nil},
-	{"~/docs", 70211, "[::1]:3000", 2 * time.Hour, 140 << 20, "node node_modules/.bin/next dev", []int{70209}},
+	{"~/docs", 70211, "[::1]:3000", 2 * time.Hour, 140 << 20, "node node_modules/.bin/next dev", []scan.Process{{PID: 70209, Command: "pnpm dev"}}},
 }
 
 // Scan returns the processes not yet stopped.
@@ -57,7 +57,7 @@ func (b *Backend) Scan(context.Context) ([]scan.Group, error) {
 		}
 		l := scan.Listener{
 			PID: e.pid, PPID: 1, Name: "node", Command: e.cmd, Cwd: e.dir,
-			Addrs: []string{e.addr}, Started: b.start.Add(-e.age), RSS: e.mem, Wrappers: e.wrappers,
+			Addrs: []string{e.addr}, Started: b.start.Add(-e.age), RSS: e.mem, Launchers: e.launchers,
 		}
 		i := slices.IndexFunc(gs, func(g scan.Group) bool { return g.Dir == e.dir })
 		if i < 0 {
