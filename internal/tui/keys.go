@@ -28,8 +28,9 @@ func defaultKeys() keyMap {
 		Help:      b("?", "more", "?"),
 		Quit:      b("q", "quit", "q"),
 		ForceQuit: b("ctrl+c", "quit", "ctrl+c"),
-		Confirm:   b("y", "stop", "y", "enter"),
-		Cancel:    b("n", "cancel", "n", "esc", "q"),
+		// Not enter: a habitual enter should never stop anything.
+		Confirm: b("y", "stop", "y"),
+		Cancel:  b("n", "cancel", "n", "esc", "q"),
 	}
 }
 
