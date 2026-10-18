@@ -4,13 +4,17 @@ package tui
 import (
 	"context"
 	"os"
+	"os/exec"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -51,6 +55,7 @@ const (
 	modeScanning mode = iota
 	modeList
 	modeConfirm
+	modeFilter
 )
 
 // state is what happened to a listener this session.
@@ -94,7 +99,10 @@ type tally struct {
 type model struct {
 	backend  Backend
 	mode     mode
-	groups   []scan.Group
+	all      []scan.Group // the last scan
+	groups   []scan.Group // all, filtered
+	filter   textinput.Model
+	anchor   int // start of a range selection, -1 when none
 	items    []item
 	selected map[int]bool
 	states   map[int]state
@@ -133,7 +141,11 @@ func newModel(b Backend) model {
 		keys:     defaultKeys(),
 		help:     help.New(),
 		noAnim:   os.Getenv("SWEEP_NO_ANIM") != "",
+		anchor:   -1,
 	}
+	m.filter = textinput.New()
+	m.filter.Prompt = "/"
+	m.filter.Placeholder = "command, dir, pid or :port"
 	m.applyTheme()
 	return m
 }
@@ -261,6 +273,24 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.mode == modeFilter {
+		switch msg.String() {
+		case "enter":
+			m.mode = modeList
+			m.filter.Blur()
+			return m, nil
+		case "esc":
+			m.mode = modeList
+			m.filter.Blur()
+			m.filter.SetValue("")
+			m.rebuild()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.filter, cmd = m.filter.Update(msg)
+		m.rebuild()
+		return m, cmd
+	}
 	if m.mode != modeList {
 		return m, nil
 	}
@@ -289,7 +319,31 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.ToggleDir):
 		m.toggleGroup(m.currentGroup())
 	case key.Matches(msg, m.keys.Clear):
-		clear(m.selected)
+		switch {
+		case m.anchor >= 0:
+			m.anchor = -1
+		case len(m.selected) > 0:
+			clear(m.selected)
+		case m.filter.Value() != "":
+			m.filter.SetValue("")
+			m.rebuild()
+		}
+	case key.Matches(msg, m.keys.Filter):
+		m.mode = modeFilter
+		return m, m.filter.Focus()
+	case key.Matches(msg, m.keys.Range):
+		m.rangeSelect()
+	case key.Matches(msg, m.keys.Open):
+		if l := m.current(); l != nil && l.Cwd != "" {
+			m.hint = "opened " + scan.ShortDir(l.Cwd)
+			return m, openDir(l.Cwd)
+		}
+	case key.Matches(msg, m.keys.Copy):
+		if l := m.current(); l != nil {
+			c := restartCommand(*l)
+			m.hint = "copied: " + c
+			return m, tea.SetClipboard(c)
+		}
 	case key.Matches(msg, m.keys.Stop):
 		if !stopping && len(m.targets()) > 0 {
 			m.mode = modeConfirm
@@ -322,18 +376,11 @@ func (m model) startStop() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) setGroups(gs []scan.Group) {
-	m.groups = gs
-	m.items = m.items[:0]
+	m.all = gs
 	alive := map[int]bool{}
-	for gi := range gs {
-		if gi > 0 {
-			m.items = append(m.items, item{group: gi, spacer: true})
-		}
-		m.items = append(m.items, item{group: gi, head: true})
-		for li := range gs[gi].Listeners {
-			l := &gs[gi].Listeners[li]
+	for _, g := range gs {
+		for _, l := range g.Listeners {
 			alive[l.PID] = true
-			m.items = append(m.items, item{group: gi, l: l})
 		}
 	}
 	for pid := range m.selected {
@@ -350,11 +397,124 @@ func (m *model) setGroups(gs []scan.Group) {
 	}
 	m.batch, m.batchDone = 0, 0
 	m.lastBatch = tally{}
+	m.rebuild()
+}
+
+// rebuild lays out the rows for m.all under the current filter.
+func (m *model) rebuild() {
+	m.groups = filterGroups(m.all, m.filter.Value())
+	m.items = m.items[:0]
+	for gi := range m.groups {
+		if gi > 0 {
+			m.items = append(m.items, item{group: gi, spacer: true})
+		}
+		m.items = append(m.items, item{group: gi, head: true})
+		for li := range m.groups[gi].Listeners {
+			m.items = append(m.items, item{group: gi, l: &m.groups[gi].Listeners[li]})
+		}
+	}
 	m.cursor = min(m.cursor, max(len(m.items)-1, 0))
 	for m.cursor < len(m.items)-1 && (m.items[m.cursor].spacer || m.items[m.cursor].head) {
 		m.cursor++
 	}
+	m.anchor = -1
 	m.clampScroll()
+}
+
+// filterGroups keeps listeners matching q: ":5173" matches a port, anything
+// else is a case-insensitive match on the command, directory or pid.
+func filterGroups(gs []scan.Group, q string) []scan.Group {
+	q = strings.ToLower(strings.TrimSpace(q))
+	if q == "" {
+		return gs
+	}
+	var out []scan.Group
+	for _, g := range gs {
+		var keep []scan.Listener
+		for _, l := range g.Listeners {
+			if matches(l, q) {
+				keep = append(keep, l)
+			}
+		}
+		if len(keep) > 0 {
+			out = append(out, scan.Group{Dir: g.Dir, Listeners: keep})
+		}
+	}
+	return out
+}
+
+func matches(l scan.Listener, q string) bool {
+	if port, ok := strings.CutPrefix(q, ":"); ok {
+		for _, a := range l.Addrs {
+			if _, p, ok := strings.CutLast(a, ":"); ok && strings.HasPrefix(p, port) {
+				return true
+			}
+		}
+		return false
+	}
+	return strings.Contains(strings.ToLower(format.Command(l.Command)), q) ||
+		strings.Contains(strings.ToLower(l.Command), q) ||
+		strings.Contains(strings.ToLower(l.Cwd), q) ||
+		strconv.Itoa(l.PID) == q
+}
+
+// current is the listener under the cursor, if any.
+func (m model) current() *scan.Listener {
+	if len(m.items) == 0 {
+		return nil
+	}
+	return m.items[m.cursor].l
+}
+
+// rangeSelect marks a start row on the first press and selects every live
+// row from there to the cursor on the second.
+func (m *model) rangeSelect() {
+	if m.anchor < 0 {
+		m.anchor = m.cursor
+		m.hint = "range: move, then press v again"
+		return
+	}
+	lo, hi := min(m.anchor, m.cursor), max(m.anchor, m.cursor)
+	for _, it := range m.items[lo : hi+1] {
+		if it.l != nil && m.live(*it.l) {
+			m.selected[it.l.PID] = true
+		}
+	}
+	m.anchor = -1
+}
+
+// restartCommand is how to start l again: its outermost launcher (what you
+// typed, e.g. "pnpm dev") or the server itself, run from its directory.
+func restartCommand(l scan.Listener) string {
+	c := format.Command(l.Command)
+	if n := len(l.Launchers); n > 0 {
+		c = format.Command(l.Launchers[n-1].Command)
+	}
+	if l.Cwd == "" {
+		return c
+	}
+	return "cd " + shellQuote(l.Cwd) + " && " + c
+}
+
+func shellQuote(s string) string {
+	safe := func(r rune) bool {
+		return strings.ContainsRune("/.-_~", r) || ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z') || ('0' <= r && r <= '9')
+	}
+	if s != "" && strings.IndexFunc(s, func(r rune) bool { return !safe(r) }) < 0 {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func openDir(dir string) tea.Cmd {
+	return func() tea.Msg {
+		opener := "xdg-open"
+		if runtime.GOOS == "darwin" {
+			opener = "open"
+		}
+		_ = exec.Command(opener, dir).Start()
+		return nil
+	}
 }
 
 func (m model) find(pid int) *scan.Listener {

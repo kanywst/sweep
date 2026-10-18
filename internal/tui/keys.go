@@ -4,7 +4,8 @@ import "charm.land/bubbles/v2/key"
 
 type keyMap struct {
 	Up, Down, PageUp, PageDown, Top, Bottom key.Binding
-	Toggle, ToggleDir, Clear                key.Binding
+	Toggle, ToggleDir, Range, Clear         key.Binding
+	Filter, Open, Copy                      key.Binding
 	Stop, Refresh, Help, Quit, ForceQuit    key.Binding
 	Confirm, Cancel                         key.Binding
 }
@@ -22,7 +23,11 @@ func defaultKeys() keyMap {
 		Bottom:    b("G", "bottom", "G", "end"),
 		Toggle:    b("space", "select", "space"),
 		ToggleDir: b("a", "select dir", "a"),
+		Range:     b("v", "select range", "v"),
 		Clear:     b("esc", "clear", "esc"),
+		Filter:    b("/", "filter", "/"),
+		Open:      b("o", "open dir", "o"),
+		Copy:      b("c", "copy start cmd", "c"),
 		Stop:      b("x", "stop", "x", "d", "delete"),
 		Refresh:   b("r", "refresh", "r"),
 		Help:      b("?", "more", "?"),
@@ -35,13 +40,14 @@ func defaultKeys() keyMap {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Toggle, k.ToggleDir, k.Stop, k.Refresh, k.Help, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Toggle, k.ToggleDir, k.Stop, k.Filter, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Top, k.Bottom},
-		{k.Toggle, k.ToggleDir, k.Clear},
-		{k.Stop, k.Refresh, k.Help, k.Quit},
+		{k.Toggle, k.ToggleDir, k.Range, k.Clear},
+		{k.Stop, k.Refresh, k.Filter, k.Open, k.Copy},
+		{k.Help, k.Quit},
 	}
 }

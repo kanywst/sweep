@@ -75,13 +75,15 @@ func (m model) render() string {
 		body = m.st.fail.Render("✗ scan failed: ") + m.st.text.Render(m.err.Error())
 	case m.mode == modeScanning && len(m.items) == 0:
 		body = m.spinner.View() + m.st.dim.Render(" looking for listening ports…")
+	case len(m.items) == 0 && m.filter.Value() != "":
+		body = m.st.dim.Render("nothing matches ") + m.st.text.Render(m.filter.Value()) + m.st.faint.Render("   esc to clear")
 	case n == 0 && m.batchDone == m.batch:
 		body = m.allClear(inner, m.listHeight()+1)
 	default:
 		body = m.columns(inner) + "\n" + m.list(inner)
 	}
 
-	top := m.st.app.Render(m.header(inner) + "\n\n" + body)
+	top := m.st.app.Render(m.header(inner) + "\n" + m.filterLine(inner) + "\n" + body)
 	footer := lipgloss.NewStyle().Padding(0, 2).Render(m.footer(inner))
 	screen := lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Height(m.height-lipgloss.Height(footer)).Render(top),
@@ -108,6 +110,24 @@ func (m model) header(w int) string {
 	}
 	gap := max(w-lipgloss.Width(left)-lipgloss.Width(right), 1)
 	return left + strings.Repeat(" ", gap) + right
+}
+
+// filterLine shows the filter while typing it, or while one is applied.
+func (m model) filterLine(w int) string {
+	if m.mode != modeFilter && m.filter.Value() == "" {
+		return ""
+	}
+	shown := 0
+	for _, it := range m.items {
+		if it.l != nil {
+			shown++
+		}
+	}
+	line := m.filter.View()
+	if m.mode != modeFilter {
+		line = m.st.dim.Render("/") + m.st.selected.Render(m.filter.Value())
+	}
+	return ansi.Truncate(line+m.st.faint.Render(fmt.Sprintf("   %d shown", shown)), w, "…")
 }
 
 func (m model) columns(w int) string {

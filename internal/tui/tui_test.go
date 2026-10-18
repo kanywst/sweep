@@ -240,3 +240,55 @@ func TestModalFitsShortTerminal(t *testing.T) {
 		t.Fatalf("buttons must stay on screen:\n%s", out)
 	}
 }
+
+func typeText(m tea.Model, s string) tea.Model {
+	for _, r := range s {
+		m, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	return m
+}
+
+func TestFilterByPortAndText(t *testing.T) {
+	m := press(loaded(t), "/")
+	m = typeText(m, ":517")
+	out := screen(m)
+	if !strings.Contains(out, "vite dev") || strings.Contains(out, "http.server") || !strings.Contains(out, "1 shown") {
+		t.Fatalf(":517 should keep only :5173:\n%s", out)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.(model).mode != modeList || !strings.Contains(screen(m), "/:517") {
+		t.Fatal("enter keeps the filter applied")
+	}
+	m = press(m, "esc")
+	if strings.Contains(screen(m), "1 shown") {
+		t.Fatal("esc clears an applied filter")
+	}
+	m = press(m, "/")
+	m = typeText(m, "preview")
+	if out := screen(m); !strings.Contains(out, "vite preview") || strings.Contains(out, "vite dev ") {
+		t.Fatalf("text filter:\n%s", out)
+	}
+	m = typeText(m, "zzz")
+	if !strings.Contains(screen(m), "nothing matches") {
+		t.Fatal("empty result should say so")
+	}
+}
+
+func TestRangeSelect(t *testing.T) {
+	m := press(loaded(t), "v", "j", "j", "j", "v")
+	sel := m.(model).selected
+	if !sel[200] || !sel[100] || !sel[101] {
+		t.Fatalf("range should cover rows 200..101, got %v", sel)
+	}
+}
+
+func TestRestartCommand(t *testing.T) {
+	l := fixture()[1].Listeners[0]
+	if got := restartCommand(l); got != "cd /work/app && pnpm dev" {
+		t.Errorf("got %q", got)
+	}
+	l.Cwd, l.Launchers = "/tmp/my dir", nil
+	if got := restartCommand(l); got != "cd '/tmp/my dir' && vite dev" {
+		t.Errorf("got %q", got)
+	}
+}
