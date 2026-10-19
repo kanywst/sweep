@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,23 +21,36 @@ import (
 
 type stopOptions struct {
 	dryRun, yes bool
+	// olderThan, when set, picks every dev server started longer ago than
+	// this instead of the listeners named in args.
+	olderThan   time.Duration
+	home        string
 	in          io.Reader
 	interactive bool
 	stop        func([]proc.Target) []proc.Result
-	scan        func(context.Context) ([]scan.Group, error)
+	scan        func(context.Context, scan.PortOptions) ([]scan.Group, error)
 }
 
-// stopCommand stops listeners named by port (":5173") or pid ("41207").
+// stopCommand stops listeners named by port (":5173") or pid ("41207"), or
+// with o.olderThan every dev server older than that.
 func stopCommand(ctx context.Context, out io.Writer, args []string, o stopOptions) error {
-	if len(args) == 0 {
-		return errors.New("stop needs a :port or a pid (try sweep help)")
+	if len(args) == 0 && o.olderThan == 0 {
+		return errors.New("stop needs a :port, a pid or --older-than (try sweep help)")
 	}
-	gs, err := o.scan(ctx)
+	// A port or pid can name anything, but --older-than only picks from what
+	// sweep ports lists, never a system process.
+	gs, err := o.scan(ctx, scan.PortOptions{All: o.olderThan == 0})
 	if err != nil {
 		return err
 	}
-	ls, err := resolve(gs, args)
-	if err != nil {
+	var ls []scan.Listener
+	if o.olderThan > 0 {
+		ls = olderThan(gs, time.Now().Add(-o.olderThan), o.home)
+		if len(ls) == 0 {
+			fmt.Fprintf(out, "nothing started more than %s ago\n", format.Age(o.olderThan))
+			return nil
+		}
+	} else if ls, err = resolve(gs, args); err != nil {
 		return err
 	}
 
@@ -88,6 +102,33 @@ func stopCommand(ctx context.Context, out io.Writer, args []string, o stopOption
 	return nil
 }
 
+// olderThan returns the listeners known to have started before cutoff from a
+// project directory under home, in scan order. Apps (~/Library/...) and
+// services such as Homebrew's mysqld also listen, but are not dev servers you
+// left behind, so a bulk stop leaves them alone.
+func olderThan(gs []scan.Group, cutoff time.Time, home string) []scan.Listener {
+	var out []scan.Listener
+	for _, g := range gs {
+		if home == "" || !inside(g.Dir, home) || inside(g.Dir, filepath.Join(home, "Library")) {
+			continue
+		}
+		for _, l := range g.Listeners {
+			// A zero start time means ps did not report the pid; its age is
+			// unknown, so it is not old.
+			if !l.Started.IsZero() && l.Started.Before(cutoff) {
+				out = append(out, l)
+			}
+		}
+	}
+	return out
+}
+
+// inside reports whether dir is root or below it.
+func inside(dir, root string) bool {
+	rel, err := filepath.Rel(root, dir)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
 // resolve maps ":port" and "pid" arguments to listeners, in argument order.
 func resolve(gs []scan.Group, args []string) ([]scan.Listener, error) {
 	var out []scan.Listener
@@ -128,7 +169,9 @@ func matchesArg(l scan.Listener, a string) bool {
 }
 
 func systemStopOptions(dryRun, yes bool) stopOptions {
+	home, _ := os.UserHomeDir()
 	return stopOptions{
+		home:        home,
 		dryRun:      dryRun,
 		yes:         yes,
 		in:          os.Stdin,
@@ -136,8 +179,8 @@ func systemStopOptions(dryRun, yes bool) stopOptions {
 		stop: func(ts []proc.Target) []proc.Result {
 			return proc.Stop(ts, 3*time.Second, proc.SystemLookup)
 		},
-		scan: func(ctx context.Context) ([]scan.Group, error) {
-			return scan.Ports(ctx, scan.ExecRunner, scan.PortOptions{All: true})
+		scan: func(ctx context.Context, opt scan.PortOptions) ([]scan.Group, error) {
+			return scan.Ports(ctx, scan.ExecRunner, opt)
 		},
 	}
 }

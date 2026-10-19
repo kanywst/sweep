@@ -22,6 +22,10 @@ func TestRunArgs(t *testing.T) {
 		{args: []string{"--bogus"}, wantErr: "flag provided but not defined: -bogus (try sweep help)"},
 		{args: []string{"ports", "extra"}, wantErr: `unexpected argument "extra"`},
 		{args: []string{"nope"}, wantErr: `unknown command "nope"`},
+		{args: []string{"ports", "--older-than", "7d"}, wantErr: "--older-than goes with stop"},
+		{args: []string{"stop", ":5173", "--older-than", "7d"}, wantErr: "not both"},
+		{args: []string{"--older-than", "soon", "stop"}, wantErr: `invalid age "soon"`},
+		{args: []string{"stop"}, wantErr: "--older-than"},
 	} {
 		var out bytes.Buffer
 		err := run(t.Context(), tc.args, &out)
