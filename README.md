@@ -29,9 +29,10 @@ sweep                      # interactive view
 sweep ports                # plain list (--json, --all for system services)
 sweep stop :5173           # stop what listens on a port, with its launchers
 sweep stop 41207 --dry-run # by pid; print what would be stopped
+sweep stop --older-than 7d # everything left running for a week or more
 ```
 
-`sweep stop` asks before stopping; pass `--yes` when running it from a script.
+`sweep stop` asks before stopping; pass `--yes` when running it from a script. `--older-than` (`7d`, `2w`, `12h`) only picks processes started from a directory in your home, outside `~/Library`, so apps and Homebrew services that also listen on a port are left alone. Finding nothing that old is not an error, so it can run from cron.
 
 The interactive view has three tabs (`tab`, or `1` `2` `3`):
 

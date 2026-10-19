@@ -4,6 +4,7 @@ package format
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -22,6 +23,26 @@ func Age(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%dw", int(d.Hours()/24/7))
 	}
+}
+
+// ParseAge reads an age the way Age writes it (3d, 2w), or any Go duration
+// (90m, 1h30m).
+func ParseAge(s string) (time.Duration, error) {
+	day := 24 * time.Hour
+	for suffix, unit := range map[string]time.Duration{"d": day, "w": 7 * day} {
+		if n, ok := strings.CutSuffix(s, suffix); ok {
+			v, err := strconv.ParseFloat(n, 64)
+			if err != nil || v <= 0 {
+				return 0, fmt.Errorf("invalid age %q", s)
+			}
+			return time.Duration(v * float64(unit)), nil
+		}
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("invalid age %q (use 7d, 2w or 12h)", s)
+	}
+	return d, nil
 }
 
 // Bytes renders n with a binary unit: 512B, 12M, 3.4G.

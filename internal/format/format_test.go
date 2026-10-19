@@ -22,6 +22,22 @@ func TestAge(t *testing.T) {
 	}
 }
 
+func TestParseAge(t *testing.T) {
+	day := 24 * time.Hour
+	for in, want := range map[string]time.Duration{
+		"7d": 7 * day, "2w": 14 * day, "1.5d": 36 * time.Hour, "12h": 12 * time.Hour, "90m": 90 * time.Minute,
+	} {
+		if got, err := ParseAge(in); err != nil || got != want {
+			t.Errorf("ParseAge(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "d", "-1d", "0d", "7", "7y", "-5m", "0s"} {
+		if _, err := ParseAge(in); err == nil {
+			t.Errorf("ParseAge(%q): no error", in)
+		}
+	}
+}
+
 func TestBytes(t *testing.T) {
 	for _, tc := range []struct {
 		n    int64

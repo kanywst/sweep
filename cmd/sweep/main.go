@@ -30,6 +30,9 @@ Usage:
   sweep              open the interactive view
   sweep ports        list processes with listening ports, grouped by directory
   sweep stop :5173   stop what listens on a port (or give a pid), with its launchers
+  sweep stop --older-than 7d
+                     stop everything started from a directory in your home (not
+                     ~/Library) more than 7 days ago
   sweep version      print the version (also -v, --version)
 
 Flags for ports:
@@ -37,6 +40,7 @@ Flags for ports:
   --all              include system processes (working directory "/")
 
 Flags for stop:
+  --older-than AGE   instead of :port or pid: 7d, 2w, 12h
   --dry-run          print what would be stopped and stop nothing
   -y, --yes          do not ask for confirmation (required when not a terminal)
 `
@@ -53,11 +57,16 @@ func main() {
 func run(ctx context.Context, args []string, out io.Writer) error {
 	// Flags may come before or after the command: take the first bare word as
 	// the command and parse everything else as flags.
-	// Every flag is a boolean, so a bare word is never a flag value.
+	// --older-than is the only flag with a value, so it is the only flag that
+	// may be followed by a bare word that is not the command.
 	cmd := ""
 	var flags, rest []string
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		switch {
+		case (a == "--older-than" || a == "-older-than") && i+1 < len(args):
+			flags = append(flags, a, args[i+1])
+			i++
 		case a != "" && a[0] == '-':
 			flags = append(flags, a)
 		case cmd == "":
@@ -71,6 +80,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	jsonOut := fs.Bool("json", false, "print JSON")
 	all := fs.Bool("all", false, "include system processes")
 	dryRun := fs.Bool("dry-run", false, "print what would be stopped")
+	olderThan := fs.String("older-than", "", "stop every dev server older than this")
 	yes := fs.Bool("yes", false, "stop without asking")
 	fs.BoolVar(yes, "y", false, "stop without asking")
 	showVersion := fs.Bool("version", false, "print the version")
@@ -84,6 +94,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 	if len(rest) > 0 && cmd != "stop" {
 		return fmt.Errorf("unexpected argument %q (try sweep help)", rest[0])
+	}
+	if *olderThan != "" && cmd != "stop" {
+		return errors.New("--older-than goes with stop (try sweep help)")
 	}
 	if *showVersion {
 		cmd = "version"
@@ -103,7 +116,18 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	case "ports":
 		return printPorts(ctx, out, opt, *jsonOut)
 	case "stop":
-		return stopCommand(ctx, out, rest, systemStopOptions(*dryRun, *yes))
+		o := systemStopOptions(*dryRun, *yes)
+		if *olderThan != "" {
+			if len(rest) > 0 {
+				return errors.New("give a :port or pid, or --older-than, not both")
+			}
+			d, err := format.ParseAge(*olderThan)
+			if err != nil {
+				return err
+			}
+			o.olderThan = d
+		}
+		return stopCommand(ctx, out, rest, o)
 	case "version":
 		_, err := fmt.Fprintln(out, "sweep", version.String())
 		return err
