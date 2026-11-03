@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -41,6 +42,7 @@ Flags for ports:
 
 Flags for stop:
   --older-than AGE   instead of :port or pid: 7d, 2w, 12h
+  --except NAME      with --older-than, leave NAME running: claude,vite
   --dry-run          print what would be stopped and stop nothing
   -y, --yes          do not ask for confirmation (required when not a terminal)
 `
@@ -57,14 +59,14 @@ func main() {
 func run(ctx context.Context, args []string, out io.Writer) error {
 	// Flags may come before or after the command: take the first bare word as
 	// the command and parse everything else as flags.
-	// --older-than is the only flag with a value, so it is the only flag that
-	// may be followed by a bare word that is not the command.
+	// Only --older-than and --except take a value, so only they may be followed
+	// by a bare word that is not the command.
 	cmd := ""
 	var flags, rest []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
-		case (a == "--older-than" || a == "-older-than") && i+1 < len(args):
+		case valueFlag(a) && i+1 < len(args):
 			flags = append(flags, a, args[i+1])
 			i++
 		case a != "" && a[0] == '-':
@@ -81,6 +83,15 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	all := fs.Bool("all", false, "include system processes")
 	dryRun := fs.Bool("dry-run", false, "print what would be stopped")
 	olderThan := fs.String("older-than", "", "stop every dev server older than this")
+	var except []string
+	fs.Func("except", "keep processes with this name", func(v string) error {
+		for n := range strings.SplitSeq(v, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				except = append(except, n)
+			}
+		}
+		return nil
+	})
 	yes := fs.Bool("yes", false, "stop without asking")
 	fs.BoolVar(yes, "y", false, "stop without asking")
 	showVersion := fs.Bool("version", false, "print the version")
@@ -97,6 +108,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 	if *olderThan != "" && cmd != "stop" {
 		return errors.New("--older-than goes with stop (try sweep help)")
+	}
+	if len(except) > 0 && *olderThan == "" {
+		return errors.New("--except goes with stop --older-than (try sweep help)")
 	}
 	if *showVersion {
 		cmd = "version"
@@ -125,7 +139,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			if err != nil {
 				return err
 			}
-			o.olderThan = d
+			o.olderThan, o.except = d, except
 		}
 		return stopCommand(ctx, out, rest, o)
 	case "version":
@@ -137,6 +151,15 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	default:
 		return fmt.Errorf("unknown command %q (try sweep help)", cmd)
 	}
+}
+
+// valueFlag reports whether a takes the next argument as its value.
+func valueFlag(a string) bool {
+	switch a {
+	case "--older-than", "-older-than", "--except", "-except":
+		return true
+	}
+	return false
 }
 
 func printPorts(ctx context.Context, out io.Writer, opt scan.PortOptions, asJSON bool) error {

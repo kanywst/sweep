@@ -130,14 +130,31 @@ func TestOlderThanOnlyProjectsUnderHome(t *testing.T) {
 	}
 	var dirs []string
 	for _, g := range gs {
-		if len(olderThan([]scan.Group{g}, time.Now(), "/Users/me")) > 0 {
+		if len(olderThan([]scan.Group{g}, time.Now(), "/Users/me", nil)) > 0 {
 			dirs = append(dirs, g.Dir)
 		}
 	}
 	if want := []string{"/Users/me/app", "/Users/me"}; !slices.Equal(dirs, want) {
 		t.Errorf("picked %v, want %v", dirs, want)
 	}
-	if len(olderThan(gs, time.Now(), "")) != 0 {
+	if len(olderThan(gs, time.Now(), "", nil)) != 0 {
 		t.Error("no home: picked something")
+	}
+}
+
+func TestOlderThanExcept(t *testing.T) {
+	old := time.Unix(1, 0)
+	gs := []scan.Group{{Dir: "/Users/me/app", Listeners: []scan.Listener{
+		{PID: 1, Command: "claude --resume", Started: old},
+		{PID: 2, Command: "node /w/node_modules/.bin/vite dev", Started: old,
+			Launchers: []scan.Process{{PID: 3, Command: "pnpm dev"}}},
+		{PID: 4, Command: "node server.js", Started: old},
+	}}}
+	var pids []int
+	for _, l := range olderThan(gs, time.Now(), "/Users/me", []string{"claude", "vite"}) {
+		pids = append(pids, l.PID)
+	}
+	if want := []int{4}; !slices.Equal(pids, want) {
+		t.Errorf("picked %v, want %v", pids, want)
 	}
 }

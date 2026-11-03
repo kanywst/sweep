@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -23,7 +24,9 @@ type stopOptions struct {
 	dryRun, yes bool
 	// olderThan, when set, picks every dev server started longer ago than
 	// this instead of the listeners named in args.
-	olderThan   time.Duration
+	olderThan time.Duration
+	// except names programs --older-than leaves running.
+	except      []string
 	home        string
 	in          io.Reader
 	interactive bool
@@ -45,7 +48,7 @@ func stopCommand(ctx context.Context, out io.Writer, args []string, o stopOption
 	}
 	var ls []scan.Listener
 	if o.olderThan > 0 {
-		ls = olderThan(gs, time.Now().Add(-o.olderThan), o.home)
+		ls = olderThan(gs, time.Now().Add(-o.olderThan), o.home, o.except)
 		if len(ls) == 0 {
 			fmt.Fprintf(out, "nothing started more than %s ago\n", format.Age(o.olderThan))
 			return nil
@@ -105,8 +108,9 @@ func stopCommand(ctx context.Context, out io.Writer, args []string, o stopOption
 // olderThan returns the listeners known to have started before cutoff from a
 // project directory under home, in scan order. Apps (~/Library/...) and
 // services such as Homebrew's mysqld also listen, but are not dev servers you
-// left behind, so a bulk stop leaves them alone.
-func olderThan(gs []scan.Group, cutoff time.Time, home string) []scan.Listener {
+// left behind, so a bulk stop leaves them alone. It also skips the programs
+// named in except.
+func olderThan(gs []scan.Group, cutoff time.Time, home string, except []string) []scan.Listener {
 	var out []scan.Listener
 	for _, g := range gs {
 		if home == "" || !inside(g.Dir, home) || inside(g.Dir, filepath.Join(home, "Library")) {
@@ -115,12 +119,18 @@ func olderThan(gs []scan.Group, cutoff time.Time, home string) []scan.Listener {
 		for _, l := range g.Listeners {
 			// A zero start time means ps did not report the pid; its age is
 			// unknown, so it is not old.
-			if !l.Started.IsZero() && l.Started.Before(cutoff) {
+			if !l.Started.IsZero() && l.Started.Before(cutoff) && !slices.Contains(except, program(l)) {
 				out = append(out, l)
 			}
 		}
 	}
 	return out
+}
+
+// program returns the name sweep shows for what l runs.
+func program(l scan.Listener) string {
+	name, _, _ := strings.Cut(format.Command(l.Command), " ")
+	return name
 }
 
 // inside reports whether dir is root or below it.

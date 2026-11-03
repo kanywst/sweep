@@ -26,6 +26,7 @@ func TestRunArgs(t *testing.T) {
 		{args: []string{"stop", ":5173", "--older-than", "7d"}, wantErr: "not both"},
 		{args: []string{"--older-than", "soon", "stop"}, wantErr: `invalid age "soon"`},
 		{args: []string{"stop"}, wantErr: "--older-than"},
+		{args: []string{"stop", ":5173", "--except", "claude"}, wantErr: "--except goes with stop --older-than"},
 	} {
 		var out bytes.Buffer
 		err := run(t.Context(), tc.args, &out)
