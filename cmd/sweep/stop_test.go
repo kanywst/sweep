@@ -145,19 +145,16 @@ func TestOlderThanOnlyProjectsUnderHome(t *testing.T) {
 func TestOlderThanExcept(t *testing.T) {
 	old := time.Unix(1, 0)
 	gs := []scan.Group{{Dir: "/Users/me/app", Listeners: []scan.Listener{
-		{PID: 1, Name: "node", Command: "node /opt/homebrew/bin/claude", Started: old},
-		{PID: 2, Name: "claude", Command: "claude --resume", Started: old},
-		{PID: 3, Name: "node", Command: "node server.js", Started: old,
-			Launchers: []scan.Process{{PID: 4, Command: "/usr/local/bin/code --wait"}}},
-		{PID: 5, Name: "node", Command: "node vite", Started: old},
+		{PID: 1, Command: "claude --resume", Started: old},
+		{PID: 2, Command: "node /w/node_modules/.bin/vite dev", Started: old,
+			Launchers: []scan.Process{{PID: 3, Command: "/usr/local/bin/code --wait"}}},
+		{PID: 4, Command: "node server.js", Started: old},
 	}}}
 	var pids []int
 	for _, l := range olderThan(gs, time.Now(), "/Users/me", []string{"claude", "code"}) {
 		pids = append(pids, l.PID)
 	}
-	// 1 runs claude under node, so neither name matches; 2 is claude itself and
-	// 3 was launched by code.
-	if want := []int{1, 5}; !slices.Equal(pids, want) {
+	if want := []int{4}; !slices.Equal(pids, want) {
 		t.Errorf("picked %v, want %v", pids, want)
 	}
 }

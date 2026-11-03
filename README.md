@@ -30,10 +30,10 @@ sweep ports                # plain list (--json, --all for system services)
 sweep stop :5173           # stop what listens on a port, with its launchers
 sweep stop 41207 --dry-run # by pid; print what would be stopped
 sweep stop --older-than 7d # everything left running for a week or more
-sweep stop --older-than 7d --except claude,code # but keep these running
+sweep stop --older-than 7d --except claude
 ```
 
-`sweep stop` asks before stopping; pass `--yes` when running it from a script. `--older-than` (`7d`, `2w`, `12h`) only picks processes started from a directory in your home, outside `~/Library`, so apps and Homebrew services that also listen on a port are left alone. Some things you keep open for days also listen on a port from your home, such as a `claude` session; `--except NAME` keeps a process with that name (or one it launched) running. Finding nothing that old is not an error, so it can run from cron.
+`sweep stop` asks before stopping; pass `--yes` when running it from a script. `--older-than` (`7d`, `2w`, `12h`) only picks processes started from a directory in your home, outside `~/Library`, so apps and Homebrew services that also listen on a port are left alone. `--except claude,code` leaves those running, along with anything they launched. Finding nothing that old is not an error, so it can run from cron.
 
 The interactive view has three tabs (`tab`, or `1` `2` `3`):
 

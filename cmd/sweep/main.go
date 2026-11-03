@@ -42,8 +42,7 @@ Flags for ports:
 
 Flags for stop:
   --older-than AGE   instead of :port or pid: 7d, 2w, 12h
-  --except NAME      with --older-than, keep processes named NAME running
-                     (repeat it or separate names with commas: --except claude,code)
+  --except NAME      with --older-than, leave NAME running: claude,code
   --dry-run          print what would be stopped and stop nothing
   -y, --yes          do not ask for confirmation (required when not a terminal)
 `
@@ -60,9 +59,8 @@ func main() {
 func run(ctx context.Context, args []string, out io.Writer) error {
 	// Flags may come before or after the command: take the first bare word as
 	// the command and parse everything else as flags.
-	// --older-than and --except are the only flags with a value, so they are
-	// the only flags that may be followed by a bare word that is not the
-	// command.
+	// Only --older-than and --except take a value, so only they may be followed
+	// by a bare word that is not the command.
 	cmd := ""
 	var flags, rest []string
 	for i := 0; i < len(args); i++ {
@@ -157,9 +155,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 
 // valueFlag reports whether a takes the next argument as its value.
 func valueFlag(a string) bool {
-	switch strings.TrimLeft(a, "-") {
-	case "older-than", "except":
-		return strings.HasPrefix(a, "-")
+	switch a {
+	case "--older-than", "-older-than", "--except", "-except":
+		return true
 	}
 	return false
 }
