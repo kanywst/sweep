@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -23,7 +24,10 @@ type stopOptions struct {
 	dryRun, yes bool
 	// olderThan, when set, picks every dev server started longer ago than
 	// this instead of the listeners named in args.
-	olderThan   time.Duration
+	olderThan time.Duration
+	// except names processes --older-than leaves running, such as an
+	// editor or a claude session that holds a port for days on purpose.
+	except      []string
 	home        string
 	in          io.Reader
 	interactive bool
@@ -45,7 +49,7 @@ func stopCommand(ctx context.Context, out io.Writer, args []string, o stopOption
 	}
 	var ls []scan.Listener
 	if o.olderThan > 0 {
-		ls = olderThan(gs, time.Now().Add(-o.olderThan), o.home)
+		ls = olderThan(gs, time.Now().Add(-o.olderThan), o.home, o.except)
 		if len(ls) == 0 {
 			fmt.Fprintf(out, "nothing started more than %s ago\n", format.Age(o.olderThan))
 			return nil
@@ -105,8 +109,9 @@ func stopCommand(ctx context.Context, out io.Writer, args []string, o stopOption
 // olderThan returns the listeners known to have started before cutoff from a
 // project directory under home, in scan order. Apps (~/Library/...) and
 // services such as Homebrew's mysqld also listen, but are not dev servers you
-// left behind, so a bulk stop leaves them alone.
-func olderThan(gs []scan.Group, cutoff time.Time, home string) []scan.Listener {
+// left behind, so a bulk stop leaves them alone. A listener named in except,
+// or launched by a process named in except, is kept too.
+func olderThan(gs []scan.Group, cutoff time.Time, home string, except []string) []scan.Listener {
 	var out []scan.Listener
 	for _, g := range gs {
 		if home == "" || !inside(g.Dir, home) || inside(g.Dir, filepath.Join(home, "Library")) {
@@ -115,12 +120,41 @@ func olderThan(gs []scan.Group, cutoff time.Time, home string) []scan.Listener {
 		for _, l := range g.Listeners {
 			// A zero start time means ps did not report the pid; its age is
 			// unknown, so it is not old.
-			if !l.Started.IsZero() && l.Started.Before(cutoff) {
+			if !l.Started.IsZero() && l.Started.Before(cutoff) && !excepted(l, except) {
 				out = append(out, l)
 			}
 		}
 	}
 	return out
+}
+
+// excepted reports whether l or one of its launchers is named in except. A
+// name matches the lsof command name or the base name of the program in the
+// command line, since lsof shortens long names and node tools such as claude
+// show up under their own name only in the command line.
+func excepted(l scan.Listener, except []string) bool {
+	if len(except) == 0 {
+		return false
+	}
+	names := []string{l.Name, program(l.Command)}
+	for _, p := range l.Launchers {
+		names = append(names, program(p.Command))
+	}
+	for _, n := range names {
+		if n != "" && slices.Contains(except, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// program returns the base name of the first word of a command line.
+func program(cmd string) string {
+	f := strings.Fields(cmd)
+	if len(f) == 0 {
+		return ""
+	}
+	return filepath.Base(f[0])
 }
 
 // inside reports whether dir is root or below it.
