@@ -42,7 +42,7 @@ Flags for ports:
 
 Flags for stop:
   --older-than AGE   instead of :port or pid: 7d, 2w, 12h
-  --except NAME      with --older-than, leave NAME running: claude,code
+  --except NAME      with --older-than, leave NAME running: claude,vite
   --dry-run          print what would be stopped and stop nothing
   -y, --yes          do not ask for confirmation (required when not a terminal)
 `

@@ -108,7 +108,7 @@ func stopCommand(ctx context.Context, out io.Writer, args []string, o stopOption
 // olderThan returns the listeners known to have started before cutoff from a
 // project directory under home, in scan order. Apps (~/Library/...) and
 // services such as Homebrew's mysqld also listen, but are not dev servers you
-// left behind, so a bulk stop leaves them alone. Neither are the programs
+// left behind, so a bulk stop leaves them alone. It also skips the programs
 // named in except.
 func olderThan(gs []scan.Group, cutoff time.Time, home string, except []string) []scan.Listener {
 	var out []scan.Listener
@@ -119,7 +119,7 @@ func olderThan(gs []scan.Group, cutoff time.Time, home string, except []string) 
 		for _, l := range g.Listeners {
 			// A zero start time means ps did not report the pid; its age is
 			// unknown, so it is not old.
-			if !l.Started.IsZero() && l.Started.Before(cutoff) && !excepted(l, except) {
+			if !l.Started.IsZero() && l.Started.Before(cutoff) && !slices.Contains(except, program(l)) {
 				out = append(out, l)
 			}
 		}
@@ -127,15 +127,10 @@ func olderThan(gs []scan.Group, cutoff time.Time, home string, except []string) 
 	return out
 }
 
-// excepted reports whether l or one of its launchers runs a program named in
-// except, by the name sweep shows for it.
-func excepted(l scan.Listener, except []string) bool {
-	for _, p := range l.Targets() {
-		if name, _, _ := strings.Cut(format.Command(p.Command), " "); slices.Contains(except, name) {
-			return true
-		}
-	}
-	return false
+// program returns the name sweep shows for what l runs.
+func program(l scan.Listener) string {
+	name, _, _ := strings.Cut(format.Command(l.Command), " ")
+	return name
 }
 
 // inside reports whether dir is root or below it.

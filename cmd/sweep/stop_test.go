@@ -147,11 +147,11 @@ func TestOlderThanExcept(t *testing.T) {
 	gs := []scan.Group{{Dir: "/Users/me/app", Listeners: []scan.Listener{
 		{PID: 1, Command: "claude --resume", Started: old},
 		{PID: 2, Command: "node /w/node_modules/.bin/vite dev", Started: old,
-			Launchers: []scan.Process{{PID: 3, Command: "/usr/local/bin/code --wait"}}},
+			Launchers: []scan.Process{{PID: 3, Command: "pnpm dev"}}},
 		{PID: 4, Command: "node server.js", Started: old},
 	}}}
 	var pids []int
-	for _, l := range olderThan(gs, time.Now(), "/Users/me", []string{"claude", "code"}) {
+	for _, l := range olderThan(gs, time.Now(), "/Users/me", []string{"claude", "vite"}) {
 		pids = append(pids, l.PID)
 	}
 	if want := []int{4}; !slices.Equal(pids, want) {
