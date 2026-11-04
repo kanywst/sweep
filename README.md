@@ -4,6 +4,9 @@
 [![Release](https://img.shields.io/github/v/release/kanywst/sweep)](https://github.com/kanywst/sweep/releases)
 [![Go Reference](https://pkg.go.dev/badge/github.com/kanywst/sweep.svg)](https://pkg.go.dev/github.com/kanywst/sweep)
 
+> [!NOTE]
+> sweep is archived and no longer maintained. Its Caches tab knew a fixed list of small caches and missed what actually fills a developer's disk (VM images, build output, container stores). [kanywst/chonk](https://github.com/kanywst/chonk) replaces it: it accounts for every byte by owner and reclaims with each owner's own command. The Homebrew cask is deprecated.
+
 Find what you left running and stop it.
 
 <img src="demo.gif" alt="sweep stopping forgotten dev servers" width="800">
